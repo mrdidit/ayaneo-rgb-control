@@ -105,6 +105,12 @@ private fun AyaneoRgbApp(controller: RgbController) {
     }
     val customColors = remember { controller.loadCustomColors().toMutableStateList() }
 
+    fun copyToClipboard(label: String, text: String) {
+        val clipboard =
+            context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+    }
+
     fun selectArgb(color: Int) {
         val hsv = FloatArray(3)
         AndroidColor.colorToHSV(color, hsv)
@@ -195,6 +201,73 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
+                if (!deviceProfile.supportsDirectUart) {
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Text(
+                                "Help add this device",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                "This model is in safe mode. Direct UART writes are disabled " +
+                                    "until its device node and protocol are verified.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text("1. Open AYANEO's stock RGB effects screen and select Static.")
+                            Text("2. Return here and copy the diagnostics report.")
+                            Text("3. In the stock app, test pure green #00FF00 and note what you see.")
+                            Text("4. Test pure blue #0000FF and note what you see.")
+                            Text("5. Send the diagnostics and colour observations to the developer.")
+                            Text(
+                                "The report is read-only and does not capture UART packet bytes. " +
+                                    "A developer may arrange a separate controlled trace afterward. " +
+                                    "Do not try UART nodes manually.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp,
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            status = "Collecting read-only diagnostics…"
+                                            val report = controller.collectDiagnostics()
+                                            copyToClipboard("AYANEO RGB diagnostics", report)
+                                            status = "Diagnostics copied to clipboard"
+                                        }
+                                    },
+                                ) {
+                                    Text("Copy diagnostics")
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        copyToClipboard(
+                                            "AYANEO RGB test template",
+                                            """
+                                                Unknown AYANEO RGB device test
+                                                Model: ${deviceProfile.name}
+                                                Stock Static #00FF00 appeared as:
+                                                Stock Static #0000FF appeared as:
+                                                Other available stock modes:
+                                                Notes:
+                                            """.trimIndent(),
+                                        )
+                                        status = "Test template copied to clipboard"
+                                    },
+                                ) {
+                                    Text("Copy test template")
+                                }
+                            }
+                        }
+                    }
+                }
+
                 HoneycombColorPicker(
                     hue = hue,
                     saturation = saturation,
@@ -407,11 +480,7 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     onClick = {
                         scope.launch {
                             val report = controller.collectDiagnostics()
-                            val clipboard =
-                                context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(
-                                ClipData.newPlainText("AYANEO RGB diagnostics", report),
-                            )
+                            copyToClipboard("AYANEO RGB diagnostics", report)
                             status = "Diagnostics copied to clipboard"
                         }
                     },

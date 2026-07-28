@@ -36,6 +36,17 @@ The report intentionally excludes the device serial number. It can identify a
 likely UART and protocol family, but actual packet capture still requires a
 separate controlled trace.
 
+Unknown devices also receive an in-app **Help add this device** guide. It keeps
+direct UART disabled and asks the tester to:
+
+1. open the stock RGB screen on Static so GameWindow exposes its active UART;
+2. copy the read-only diagnostics;
+3. test fixed `#00FF00` green and `#0000FF` blue in the stock app;
+4. copy a prepared observation template; and
+5. send both items to the developer before any controlled packet trace.
+
+The guide explicitly warns users not to experiment with UART nodes manually.
+
 ## Why colour correction is needed
 
 The RGB numbers accepted by the controller do not always produce the colour
