@@ -11,8 +11,8 @@ The app provides:
 - built-in and eight persistent custom-colour presets;
 - model-aware Static, Single Breath, RGB Breath, Rainbow, and Reactive modes;
 - persistent colour, brightness, mode, and LED on/off settings;
-- direct UART output for Static mode;
-- AYANEO GameWindow integration for the stock animated modes.
+- direct UART output for verified hardware modes;
+- AYANEO GameWindow integration for animated modes on S2 and EVO;
 - exportable diagnostics for identifying and researching unknown devices.
 
 ## Hardware support
@@ -25,10 +25,11 @@ The app selects a verified profile from Android's device identity:
 | Pocket EVO | AR07 | `/dev/ttyHS4` | `0x02` |
 | Pocket FIT Elite | KR02 | `/dev/ttyHS1` | KR02 11-byte protocol |
 
-Direct Static control uses the selected UART at 115200 baud with a 27-byte
+Direct S2/EVO Static control uses the selected UART at 115200 baud with a 27-byte
 register packet captured from AYANEO GameWindow. Pocket FIT Elite uses the
 separate 11-byte KR02 light command recovered from its installed GameWindow
-package. For KR02 Static, the app first stops GameWindow's software RGB writer
+package for Static, Single Breath, Rainbow, and LED off. For KR02 control, the
+app first stops GameWindow's software RGB writer
 to prevent both applications from racing on the same UART. Unknown devices enter safe
 mode: configuration integration remains available, but direct UART output is
 disabled until a verified profile is added.
@@ -128,6 +129,7 @@ changing anything:
 
 - Pocket S2 / S2 Pro: waits for `/dev/ttyHS5`;
 - Pocket EVO: waits for `/dev/ttyHS4`;
+- Pocket FIT Elite: waits for `/dev/ttyHS1`;
 - unknown devices: exits without touching any UART;
 - labels that node `ayaneo_rgb_device`;
 - restores ownership to `system:system` and mode `664`;
@@ -135,13 +137,13 @@ changing anything:
 
 ## Current mode routing
 
-| Mode | S2 / S2 Pro | EVO | Backend |
-| --- | --- | --- | --- |
-| Static | Yes | Yes | Direct model-specific UART packet |
-| Single Breath | Yes | Yes | AYANEO GameWindow service |
-| RGB Breath | No | Yes | AYANEO GameWindow service |
-| Rainbow | Yes | Yes | AYANEO GameWindow service |
-| Reactive | No | Yes | AYANEO GameWindow service |
+| Mode | S2 / S2 Pro | EVO | FIT Elite | Backend |
+| --- | --- | --- | --- | --- |
+| Static | Yes | Yes | Yes | Direct model-specific UART packet |
+| Single Breath | Yes | Yes | Yes | GameWindow on S2/EVO; direct KR02 mode on FIT Elite |
+| RGB Breath | No | Yes | No | AYANEO GameWindow service |
+| Rainbow | Yes | Yes | Yes | GameWindow on S2/EVO; direct KR02 mode on FIT Elite |
+| Reactive | No | Yes | No | AYANEO GameWindow service |
 
 A true spatial rainbow that spins around each LED ring has not yet been
 implemented.

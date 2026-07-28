@@ -52,6 +52,7 @@ data class SavedRgbSettings(
     val ledEnabled: Boolean = true,
     val reactiveIdleColor: Int = 0xFF0000,
     val reactiveHighlightColor: Int = 0xFFC000,
+    val themeColor: Int = 0x8BE9FD,
 )
 
 class RgbController(private val context: Context) {
@@ -143,7 +144,12 @@ class RgbController(private val context: Context) {
         ledEnabled = preferences.getBoolean("led_enabled", true),
         reactiveIdleColor = preferences.getInt("reactive_idle_color", 0xFF0000),
         reactiveHighlightColor = preferences.getInt("reactive_highlight_color", 0xFFC000),
+        themeColor = preferences.getInt("theme_color", 0x8BE9FD),
     )
+
+    fun saveThemeColor(color: Int) {
+        preferences.edit().putInt("theme_color", color and 0xFFFFFF).apply()
+    }
 
     fun saveLivePreview(enabled: Boolean) {
         preferences.edit().putBoolean("live_preview", enabled).apply()
@@ -350,25 +356,26 @@ class RgbController(private val context: Context) {
                     brightness.coerceIn(1, 100).toString()
             }
 
-            val isKr02DirectStatic = mode == 6 && deviceProfile.usesKr02Protocol
-            val directStaticCommand = if (mode == 6) {
-                buildDirectStaticCommand(
+            val isKr02DirectMode =
+                deviceProfile.usesKr02Protocol && mode in setOf(1, 3, 6)
+            val directModeCommand = if (isKr02DirectMode || mode == 6) {
+                buildDirectModeCommand(
+                    mode = mode,
                     red = correctedRed.coerceIn(0, 255),
                     green = correctedGreen.coerceIn(0, 255),
                     blue = correctedBlue.coerceIn(0, 255),
                     brightness = brightness.coerceIn(1, 100),
                 )
             } else null
-            val command = if (isKr02DirectStatic) {
-                // KR02 GameWindow generates its own software light commands. Stop that
-                // writer before issuing our direct Static packet to avoid a UART race.
+            val command = if (isKr02DirectMode) {
+                // Stop GameWindow before issuing the stock KR02 MCU command so its
+                // cached effect cannot race with or overwrite the requested mode.
                 sendRgbMessage("com_set_rgb_is_open:false")
-                // Its shutdown coroutine sleeps for 100 ms before completing the serial
-                // cleanup. Leave enough margin so its off packet cannot overtake Static.
+                // Its shutdown coroutine sleeps for 100 ms before serial cleanup.
                 Thread.sleep(350)
-                directStaticCommand ?: return@withContext ApplyResult(
+                directModeCommand ?: return@withContext ApplyResult(
                     false,
-                    "Pocket FIT Elite Static command is unavailable",
+                    "Pocket FIT Elite direct command is unavailable",
                 )
             } else {
                 var configCommand =
@@ -377,7 +384,10 @@ class RgbController(private val context: Context) {
                 configCommand += values.entries.joinToString(" && ") { (file, value) ->
                     "printf '%s' '$value' > '$CONFIG_DIR/$file'"
                 }
-                directStaticCommand?.let { configCommand += " && $it" }
+                val writtenFiles = values.keys.joinToString(" ") { "'$CONFIG_DIR/$it'" }
+                configCommand +=
+                    " && chown system:system $writtenFiles && chmod 0660 $writtenFiles"
+                directModeCommand?.let { configCommand += " && $it" }
                 configCommand
             }
             val rootResult = runCatching { runAsRoot(command) }.getOrElse {
@@ -389,7 +399,7 @@ class RgbController(private val context: Context) {
                 return@withContext ApplyResult(false, output.ifBlank { "Root write failed" })
             }
 
-            val sent = if (isKr02DirectStatic) {
+            val sent = if (isKr02DirectMode) {
                 true
             } else {
                 // Mode 2-5 changes are not dispatched by GameWindow's file observer.
@@ -412,7 +422,8 @@ class RgbController(private val context: Context) {
             )
         }
 
-    private fun buildDirectStaticCommand(
+    private fun buildDirectModeCommand(
+        mode: Int,
         red: Int,
         green: Int,
         blue: Int,
@@ -420,6 +431,12 @@ class RgbController(private val context: Context) {
     ): String? {
         val uartPath = deviceProfile.uartPath ?: return null
         if (deviceProfile.usesKr02Protocol) {
+            val kr02Mode = when (mode) {
+                1 -> 0x02 // Stock Single Breath
+                3 -> 0x03 // Stock Google/Rainbow Breath
+                6 -> 0x01 // Stock Static
+                else -> return null
+            }
             val stockBrightness = brightness.coerceIn(1, 100) * 255 / 100
             fun kr02Channel(channel: Int): Int {
                 val scaled = (channel.coerceIn(0, 255) * stockBrightness * 0.6f / 255f)
@@ -428,10 +445,10 @@ class RgbController(private val context: Context) {
                 return (33.0 + scaled * (120.0 / 99.0)).roundToInt()
             }
             val packet = intArrayOf(
-                0xF7, 0x01,
-                kr02Channel(red),
-                kr02Channel(green),
-                kr02Channel(blue),
+                0xF7, kr02Mode,
+                if (mode == 3) 0 else kr02Channel(red),
+                if (mode == 3) 0 else kr02Channel(green),
+                if (mode == 3) 0 else kr02Channel(blue),
                 0x00, 0x00, 0x00, 0x00,
                 0x00, 0xED,
             )
@@ -468,7 +485,9 @@ class RgbController(private val context: Context) {
         var command =
             "mkdir -p '$CONFIG_DIR' && chown media_rw:media_rw '$CONFIG_DIR' && " +
                 "chmod 0775 '$CONFIG_DIR' && " +
-                "printf '%s' '$value' > '$CONFIG_DIR/aya_rgb_is_open.conf'"
+                "printf '%s' '$value' > '$CONFIG_DIR/aya_rgb_is_open.conf' && " +
+                "chown system:system '$CONFIG_DIR/aya_rgb_is_open.conf' && " +
+                "chmod 0660 '$CONFIG_DIR/aya_rgb_is_open.conf'"
         if (!enabled && deviceProfile.usesKr02Protocol) {
             buildKr02ShutdownCommand()?.let { command += " && $it" }
         }

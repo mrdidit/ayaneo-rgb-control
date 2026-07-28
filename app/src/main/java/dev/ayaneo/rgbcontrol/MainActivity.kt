@@ -7,8 +7,11 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -22,12 +25,18 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.TextStyle
@@ -92,10 +101,12 @@ private fun AyaneoRgbApp(controller: RgbController) {
     var ledEnabled by remember { mutableStateOf(saved.ledEnabled) }
     var reactiveIdleColor by remember { mutableIntStateOf(saved.reactiveIdleColor) }
     var reactiveHighlightColor by remember { mutableIntStateOf(saved.reactiveHighlightColor) }
+    var themeColor by remember { mutableIntStateOf(saved.themeColor) }
     var reactiveTarget by remember { mutableIntStateOf(0) }
     var status by remember { mutableStateOf("Connected to AYANEO GameWindow") }
     var pendingApply by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     val rgb = remember(hue, saturation, value) { hsvToRgb(hue, saturation, value) }
     var hexText by remember(rgb) { mutableStateOf("%02X%02X%02X".format(rgb[0], rgb[1], rgb[2])) }
 
@@ -185,9 +196,19 @@ private fun AyaneoRgbApp(controller: RgbController) {
         }
     }
 
+    val themeAccent = Color(themeColor or 0xFF000000.toInt())
+    val themeTextColor = if (
+        ((themeColor shr 16 and 255) * 0.299f +
+            (themeColor shr 8 and 255) * 0.587f +
+            (themeColor and 255) * 0.114f) > 150f
+    ) {
+        Color(0xFF101116)
+    } else {
+        Color.White
+    }
     MaterialTheme(
         colorScheme = darkColorScheme(
-            primary = Color(0xFF8BE9FD),
+            primary = themeAccent,
             secondary = Color(0xFFBD93F9),
             background = Color(0xFF101116),
             surface = Color(0xFF191B22),
@@ -198,7 +219,35 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 TopAppBar(
                     title = {
                         Column {
-                            Text("AYANEO RGB", fontWeight = FontWeight.Bold)
+                            Text(
+                                buildAnnotatedString {
+                                    val rainbow = listOf(
+                                        Color(0xFFFF4D4D),
+                                        Color(0xFFFF9F43),
+                                        Color(0xFFFFD93D),
+                                        Color(0xFF6BCB77),
+                                        Color(0xFF4DDBFF),
+                                        Color(0xFF4D79FF),
+                                        Color(0xFFB967FF),
+                                    )
+                                    var colourIndex = 0
+                                    "AYANEO RGB".forEach { character ->
+                                        if (character == ' ') {
+                                            append(character)
+                                        } else {
+                                            withStyle(
+                                                SpanStyle(
+                                                    color = rainbow[colourIndex % rainbow.size],
+                                                    fontWeight = FontWeight.Bold,
+                                                ),
+                                            ) {
+                                                append(character)
+                                            }
+                                            colourIndex++
+                                        }
+                                    }
+                                },
+                            )
                             Text(
                                 if (deviceProfile.supportsDirectUart) {
                                     "${deviceProfile.name} · ${deviceProfile.uartPath}"
@@ -219,6 +268,12 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     .padding(padding)
                     .padding(horizontal = 20.dp)
                     .fillMaxSize()
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown(pass = PointerEventPass.Initial)
+                            focusManager.clearFocus()
+                        }
+                    }
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
@@ -274,10 +329,30 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     }
                 }
 
+                val colorSelectionSupported = mode != 2 && mode != 3
+                Text(
+                    if (colorSelectionSupported) {
+                        "Colour"
+                    } else {
+                        "◆  Colour fixed by this RGB effect"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (colorSelectionSupported) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        Color(0xFFFF9F43)
+                    },
+                    fontWeight = if (colorSelectionSupported) {
+                        FontWeight.Normal
+                    } else {
+                        FontWeight.Bold
+                    },
+                )
                 HoneycombColorPicker(
                     hue = hue,
                     saturation = saturation,
                     value = value,
+                    enabled = colorSelectionSupported,
                     onChange = { h, s ->
                         hue = h
                         saturation = s
@@ -289,7 +364,8 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     },
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
-                        .size(280.dp),
+                        .size(280.dp)
+                        .alpha(if (colorSelectionSupported) 1f else 0.38f),
                 )
 
                 val selectedColor = Color(rgb[0], rgb[1], rgb[2])
@@ -304,7 +380,7 @@ private fun AyaneoRgbApp(controller: RgbController) {
                         .background(selectedColor)
                         .border(
                             1.dp,
-                            codeTextColor.copy(alpha = .25f),
+                            themeAccent.copy(alpha = .85f),
                             RoundedCornerShape(14.dp),
                         )
                         .padding(horizontal = 16.dp, vertical = 16.dp),
@@ -313,6 +389,7 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     Text("#", color = codeTextColor, fontWeight = FontWeight.Bold)
                     BasicTextField(
                         value = hexText,
+                        enabled = colorSelectionSupported,
                         onValueChange = { input ->
                             val clean = input.uppercase().filter { it in "0123456789ABCDEF" }.take(6)
                             hexText = clean
@@ -347,51 +424,37 @@ private fun AyaneoRgbApp(controller: RgbController) {
                         fontWeight = FontWeight.Medium,
                     )
                 }
-
-                val hardwareRgb = controller.correctedRgb(
-                    red = rgb[0],
-                    green = rgb[1],
-                    blue = rgb[2],
-                    colorCorrection = colorCorrection,
-                    mixedGreenPercent = mixedGreenPercent.toInt(),
-                    mixedBluePercent = mixedBluePercent.toInt(),
-                )
-                val hardwareColor = Color(hardwareRgb[0], hardwareRgb[1], hardwareRgb[2])
-                val hardwareBrightness =
-                    hardwareRgb[0] * 0.299f +
-                        hardwareRgb[1] * 0.587f +
-                        hardwareRgb[2] * 0.114f
-                val hardwareTextColor =
-                    if (hardwareBrightness > 150f) Color(0xFF101116) else Color.White
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(hardwareColor)
+                        .alpha(if (colorSelectionSupported) 1f else 0.38f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(themeAccent)
                         .border(
                             1.dp,
-                            hardwareTextColor.copy(alpha = .25f),
-                            RoundedCornerShape(10.dp),
+                            themeTextColor.copy(alpha = .28f),
+                            RoundedCornerShape(14.dp),
                         )
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .clickable(enabled = colorSelectionSupported) {
+                            themeColor =
+                                AndroidColor.rgb(rgb[0], rgb[1], rgb[2]) and 0xFFFFFF
+                            controller.saveThemeColor(themeColor)
+                        }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(
-                        "Hardware output",
-                        color = hardwareTextColor,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
+                    Box(
+                        Modifier
+                            .size(14.dp)
+                            .clip(CircleShape)
+                            .background(themeTextColor.copy(alpha = .78f)),
                     )
-                    Spacer(Modifier.weight(1f))
+                    Spacer(Modifier.width(8.dp))
                     Text(
-                        "#${"%02X%02X%02X".format(
-                            hardwareRgb[0],
-                            hardwareRgb[1],
-                            hardwareRgb[2],
-                        )} · RGB ${hardwareRgb[0]}, ${hardwareRgb[1]}, ${hardwareRgb[2]}",
-                        color = hardwareTextColor,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
+                        "Use selected colour as theme",
+                        color = themeTextColor,
+                        fontWeight = FontWeight.Bold,
                     )
                 }
 
@@ -399,21 +462,27 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(presets) { preset ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            val presetInput = if (colorSelectionSupported) {
+                                Modifier.pointerInput(preset) {
+                                    detectTapGestures {
+                                        selectArgb(
+                                            preset.color.toArgbCompat(),
+                                            "preset_${preset.key}",
+                                            preset.name,
+                                        )
+                                    }
+                                }
+                            } else {
+                                Modifier
+                            }
                             Box(
                                 Modifier
                                     .size(42.dp)
+                                    .alpha(if (colorSelectionSupported) 1f else 0.38f)
                                     .clip(CircleShape)
                                     .background(preset.color)
-                                    .border(1.dp, Color.White.copy(alpha = .25f), CircleShape)
-                                    .pointerInput(preset) {
-                                        detectTapGestures {
-                                            selectArgb(
-                                                preset.color.toArgbCompat(),
-                                                "preset_${preset.key}",
-                                                preset.name,
-                                            )
-                                        }
-                                    },
+                                    .border(2.dp, themeAccent.copy(alpha = .85f), CircleShape)
+                                    .then(presetInput),
                             )
                             Text(preset.name, fontSize = 10.sp)
                         }
@@ -430,30 +499,35 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     items(customColors.size) { index ->
                         val customColor = customColors[index]
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            val customInput = if (colorSelectionSupported) {
+                                Modifier.pointerInput(index, customColor) {
+                                    detectTapGestures(
+                                        onTap = {
+                                            if (customColor == null) saveCustomColor(index)
+                                            else selectArgb(
+                                                customColor,
+                                                "custom_$index",
+                                                "Custom colour ${index + 1}",
+                                            )
+                                        },
+                                        onLongPress = { saveCustomColor(index) },
+                                    )
+                                }
+                            } else {
+                                Modifier
+                            }
                             Box(
                                 Modifier
                                     .size(42.dp)
+                                    .alpha(if (colorSelectionSupported) 1f else 0.38f)
                                     .clip(CircleShape)
                                     .background(customColor?.let { Color(it) } ?: Color.Transparent)
                                     .border(
-                                        1.dp,
-                                        if (customColor == null) MaterialTheme.colorScheme.primary
-                                        else Color.White.copy(alpha = .25f),
+                                        2.dp,
+                                        themeAccent.copy(alpha = .85f),
                                         CircleShape,
                                     )
-                                    .pointerInput(index, customColor) {
-                                        detectTapGestures(
-                                            onTap = {
-                                                if (customColor == null) saveCustomColor(index)
-                                                else selectArgb(
-                                                    customColor,
-                                                    "custom_$index",
-                                                    "Custom colour ${index + 1}",
-                                                )
-                                            },
-                                            onLongPress = { saveCustomColor(index) },
-                                        )
-                                    },
+                                    .then(customInput),
                                 contentAlignment = Alignment.Center,
                             ) {
                                 if (customColor == null) {
@@ -465,8 +539,31 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     }
                 }
 
-                Text("Brightness ${brightness.toInt()}%", style = MaterialTheme.typography.labelLarge)
-                Slider(value = brightness, onValueChange = { brightness = it }, valueRange = 1f..100f)
+                val brightnessSupported = mode != 2 && mode != 3
+                Text(
+                    if (brightnessSupported) {
+                        "Brightness ${brightness.toInt()}%"
+                    } else {
+                        "◆  Brightness fixed by this RGB effect"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (brightnessSupported) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        Color(0xFFFF9F43)
+                    },
+                    fontWeight = if (brightnessSupported) {
+                        FontWeight.Normal
+                    } else {
+                        FontWeight.Bold
+                    },
+                )
+                Slider(
+                    value = brightness,
+                    onValueChange = { brightness = it },
+                    valueRange = 1f..100f,
+                    enabled = brightnessSupported,
+                )
 
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -543,7 +640,11 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(checked = colorCorrection, onCheckedChange = { colorCorrection = it })
+                    Switch(
+                        checked = colorCorrection,
+                        onCheckedChange = { colorCorrection = it },
+                        enabled = colorSelectionSupported,
+                    )
                     Spacer(Modifier.width(8.dp))
                     Text("Colour correction")
                 }
@@ -672,6 +773,7 @@ private fun HoneycombColorPicker(
     hue: Float,
     saturation: Float,
     value: Float,
+    enabled: Boolean,
     onChange: (Float, Float) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -711,8 +813,8 @@ private fun HoneycombColorPicker(
         onChange(hueAtCell, saturationAtCell)
     }
 
-    Canvas(
-        modifier = modifier
+    val inputModifier = if (enabled) {
+        Modifier
             .aspectRatio(1f)
             .pointerInput(Unit) {
                 detectTapGestures { point ->
@@ -729,7 +831,12 @@ private fun HoneycombColorPicker(
                         pick(change.position, size.width.toFloat(), size.height.toFloat())
                     },
                 )
-            },
+            }
+    } else {
+        Modifier.aspectRatio(1f)
+    }
+    Canvas(
+        modifier = modifier.then(inputModifier),
     ) {
         val center = this.center
         val rings = 7
