@@ -2,9 +2,6 @@ package dev.ayaneo.rgbcontrol
 
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
@@ -30,7 +27,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -66,7 +62,6 @@ private data class RgbPreset(val name: String, val color: Color)
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun AyaneoRgbApp(controller: RgbController) {
-    val context = LocalContext.current
     val deviceProfile = remember { controller.deviceProfile }
     val saved = remember { controller.loadSettings() }
     val savedHsv = remember(saved) {
@@ -104,12 +99,6 @@ private fun AyaneoRgbApp(controller: RgbController) {
         )
     }
     val customColors = remember { controller.loadCustomColors().toMutableStateList() }
-
-    fun copyToClipboard(label: String, text: String) {
-        val clipboard =
-            context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
-    }
 
     fun selectArgb(color: Int) {
         val hsv = FloatArray(3)
@@ -229,32 +218,15 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontSize = 11.sp,
                             )
-                            FlowRow(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        status = "Exporting diagnostics…"
+                                        status = controller.exportDiagnosticsBundle().message
+                                    }
+                                },
                             ) {
-                                Button(
-                                    onClick = {
-                                        scope.launch {
-                                            status = "Collecting read-only diagnostics…"
-                                            val report = controller.collectDiagnostics()
-                                            copyToClipboard("AYANEO RGB diagnostics", report)
-                                            status = "Diagnostics copied to clipboard"
-                                        }
-                                    },
-                                ) {
-                                    Text("Copy diagnostics")
-                                }
-                                OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            status = "Exporting diagnostics…"
-                                            status = controller.exportDiagnosticsBundle().message
-                                        }
-                                    },
-                                ) {
-                                    Text("Export to AYARGB")
-                                }
+                                Text("Export test bundle to AYARGB")
                             }
                         }
                     }
