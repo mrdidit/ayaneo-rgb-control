@@ -228,6 +228,16 @@ private fun AyaneoRgbApp(controller: RgbController) {
                             ) {
                                 Text("Export test bundle to AYARGB")
                             }
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        status = "Building GameWindow research bundle…"
+                                        status = controller.exportGameWindowResearchBundle().message
+                                    }
+                                },
+                            ) {
+                                Text("Export GameWindow research ZIP")
+                            }
                         }
                     }
                 }

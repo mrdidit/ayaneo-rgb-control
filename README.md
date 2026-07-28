@@ -12,7 +12,7 @@ The app provides:
 - persistent colour, brightness, mode, and LED on/off settings;
 - direct UART output for Static mode;
 - AYANEO GameWindow integration for the stock animated modes.
-- copyable diagnostics for identifying and researching unknown devices.
+- exportable diagnostics for identifying and researching unknown devices.
 
 ## Hardware support
 
@@ -28,10 +28,9 @@ register packet captured from AYANEO GameWindow. Unknown devices enter safe
 mode: configuration integration remains available, but direct UART output is
 disabled until a verified profile is added.
 
-The **Export diagnostics** button creates a report bundle under
+The **Export diagnostics** button creates one combined report under
 `/storage/emulated/0/AYARGB/`, where it can be retrieved through normal USB
-file transfer. The bundle contains a plain-text diagnostics report and a test
-notes template. The report includes the
+file transfer. The report includes the test notes template,
 Android hardware identity, selected safety profile, GameWindow version, recent
 apply/IPC results, candidate UART metadata, and any UART descriptor currently
 owned by GameWindow. The root probe is read-only and never sends a UART packet.
@@ -39,14 +38,18 @@ The report intentionally excludes the device serial number. It can identify a
 likely UART and protocol family, but actual packet capture still requires a
 separate controlled trace.
 
+Unknown-device users can also export one GameWindow research ZIP. It contains
+the diagnostic report and the APK files from the GameWindow installation for
+offline protocol analysis. Creating it does not open or write to a UART.
+
 Unknown devices also receive an in-app **Help add this device** guide. It keeps
 direct UART disabled and asks the tester to:
 
-1. select Static in this app;
-2. apply exact `#00FF00` green and `#0000FF` blue using the built-in presets;
+1. select Static in AYANEO's stock RGB controls;
+2. select a clear green and then a clear blue;
 3. record how the physical LEDs appear;
-4. export the diagnostics bundle; and
-5. send both exported files before any controlled packet trace.
+4. export the combined diagnostic report; and
+5. export the GameWindow research ZIP if requested.
 
 The guide explicitly warns users not to experiment with UART nodes manually.
 

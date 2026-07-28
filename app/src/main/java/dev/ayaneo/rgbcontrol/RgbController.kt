@@ -13,6 +13,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 data class ApplyResult(val success: Boolean, val message: String)
 data class DeviceProfile(
@@ -437,6 +440,86 @@ class RgbController(private val context: Context) {
             true,
             "Exported ${reportFile.name} to /storage/emulated/0/AYARGB",
         )
+    }
+
+    suspend fun exportGameWindowResearchBundle(): ApplyResult = withContext(Dispatchers.IO) {
+        val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val safeDevice = Build.DEVICE.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val bundleFile = File(context.cacheDir, "$timestamp-$safeDevice-gamewindow-research.zip")
+        val pathProcess = runCatching {
+            ProcessBuilder("su", "-c", "pm path '$GAMEWINDOW_PACKAGE'")
+                .redirectErrorStream(true)
+                .start()
+        }.getOrElse {
+            return@withContext ApplyResult(false, "Could not query GameWindow: ${it.message}")
+        }
+        val pathOutput = pathProcess.inputStream.bufferedReader().readText().trim()
+        if (pathProcess.waitFor() != 0) {
+            return@withContext ApplyResult(false, pathOutput.ifBlank { "GameWindow was not found" })
+        }
+        val apkPaths = pathOutput.lineSequence()
+            .mapNotNull { line -> line.removePrefix("package:").takeIf { line.startsWith("package:") } }
+            .filter { it.isNotBlank() }
+            .toList()
+        if (apkPaths.isEmpty()) {
+            return@withContext ApplyResult(false, "GameWindow APK paths were not found")
+        }
+
+        val buildResult = runCatching {
+            ZipOutputStream(FileOutputStream(bundleFile)).use { zip ->
+                zip.putNextEntry(ZipEntry("diagnostics.txt"))
+                zip.write(collectDiagnostics().toByteArray())
+                zip.closeEntry()
+                apkPaths.forEachIndexed { index, apkPath ->
+                    val entryName = if (index == 0) "gamewindow/base.apk" else {
+                        "gamewindow/split-${index}.apk"
+                    }
+                    zip.putNextEntry(ZipEntry(entryName))
+                    val copyProcess = ProcessBuilder("su", "-c", "cat '$apkPath'")
+                        .redirectErrorStream(false)
+                        .start()
+                    copyProcess.inputStream.use { it.copyTo(zip) }
+                    val errorOutput = copyProcess.errorStream.bufferedReader().readText().trim()
+                    if (copyProcess.waitFor() != 0) {
+                        error(
+                            "Could not read ${File(apkPath).name}: " +
+                                errorOutput.ifBlank { "root copy failed" },
+                        )
+                    }
+                    zip.closeEntry()
+                }
+            }
+        }
+        if (buildResult.isFailure) {
+            bundleFile.delete()
+            return@withContext ApplyResult(
+                false,
+                "Research bundle failed: ${buildResult.exceptionOrNull()?.message}",
+            )
+        }
+
+        val exportDir = "/data/media/0/AYARGB"
+        val target = "$exportDir/${bundleFile.name}"
+        val exportProcess = runCatching {
+            ProcessBuilder(
+                "su",
+                "-c",
+                "mkdir -p '$exportDir' && cp '${bundleFile.absolutePath}' '$target' && " +
+                    "chown media_rw:media_rw '$exportDir' '$target' && " +
+                    "chmod 775 '$exportDir' && chmod 664 '$target'",
+            ).redirectErrorStream(true).start()
+        }.getOrElse {
+            return@withContext ApplyResult(false, "Could not start root export: ${it.message}")
+        }
+        val exportOutput = exportProcess.inputStream.bufferedReader().readText().trim()
+        if (exportProcess.waitFor() != 0) {
+            return@withContext ApplyResult(
+                false,
+                exportOutput.ifBlank { "Research bundle export failed" },
+            )
+        }
+        logEvent("Exported GameWindow research bundle to /storage/emulated/0/AYARGB")
+        ApplyResult(true, "Exported ${bundleFile.name} to /storage/emulated/0/AYARGB")
     }
 
     private fun sendApplyMessage(): Boolean =
