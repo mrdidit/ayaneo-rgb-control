@@ -115,6 +115,28 @@ changing anything:
 A true spatial rainbow that spins around each LED ring has not yet been
 implemented.
 
+## Future development
+
+The current experimental build retains root and direct UART access because the
+Android devices are still being used to verify controller packets, model
+differences, and lighting behaviour. Removing that path now would make further
+hardware investigation more difficult.
+
+The planned normal Android backend is rootless:
+
+1. request Android's **All files access** permission once;
+2. write AYANEO's `.aya` configuration through shared storage;
+3. ask GameWindow to apply the settings through its existing service;
+4. keep direct UART access behind an optional research/developer setting;
+5. remove the Magisk requirement from normal releases after the rootless path
+   has passed the same mode, persistence, restart, and LED-off tests on every
+   supported device.
+
+Until then, the verified rooted implementation remains the stable test path.
+Future device profiles will continue to default to safe mode: no direct UART
+write is allowed until the device node and protocol selector have been
+captured and tested on real hardware.
+
 ## Safety
 
 This is device-specific experimental software. The UART implementation sends
