@@ -1,6 +1,19 @@
 #!/system/bin/sh
 
-RGB_UART=/dev/ttyHS5
+DEVICE="$(getprop ro.product.device)"
+
+case "$DEVICE" in
+    PocketS2|PocketS2Pro)
+        RGB_UART=/dev/ttyHS5
+        ;;
+    PocketEVO)
+        RGB_UART=/dev/ttyHS4
+        ;;
+    *)
+        # Unknown hardware: do not change permissions on any UART.
+        exit 0
+        ;;
+esac
 
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if [ -e "$RGB_UART" ]; then

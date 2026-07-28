@@ -1,6 +1,6 @@
 id=ayaneo_rgb_uart
 name=AYANEO RGB UART Access
-version=1.0
-versionCode=1
+version=1.1
+versionCode=2
 author=AYANEO RGB Control
-description=Labels only /dev/ttyHS5 for direct Pocket S2 RGB UART access.
+description=Device-aware direct RGB UART access for Pocket S2 and Pocket EVO.

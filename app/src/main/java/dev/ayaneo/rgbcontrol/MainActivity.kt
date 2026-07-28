@@ -59,9 +59,10 @@ class MainActivity : ComponentActivity() {
 
 private data class RgbPreset(val name: String, val color: Color)
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun AyaneoRgbApp(controller: RgbController) {
+    val deviceProfile = remember { controller.deviceProfile }
     val saved = remember { controller.loadSettings() }
     val savedHsv = remember(saved) {
         FloatArray(3).also {
@@ -76,6 +77,9 @@ private fun AyaneoRgbApp(controller: RgbController) {
     var livePreview by remember { mutableStateOf(saved.livePreview) }
     var colorCorrection by remember { mutableStateOf(saved.colorCorrection) }
     var ledEnabled by remember { mutableStateOf(saved.ledEnabled) }
+    var reactiveIdleColor by remember { mutableIntStateOf(saved.reactiveIdleColor) }
+    var reactiveHighlightColor by remember { mutableIntStateOf(saved.reactiveHighlightColor) }
+    var reactiveTarget by remember { mutableIntStateOf(0) }
     var status by remember { mutableStateOf("Connected to AYANEO GameWindow") }
     var pendingApply by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
@@ -121,12 +125,28 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 rgb[2],
                 brightness.toInt(),
                 colorCorrection,
+                reactiveIdleColor,
+                reactiveHighlightColor,
             )
             status = result.message
         }
     }
 
-    LaunchedEffect(hue, saturation, value, brightness, mode, livePreview, colorCorrection) {
+    LaunchedEffect(
+        hue,
+        saturation,
+        value,
+        brightness,
+        mode,
+        livePreview,
+        colorCorrection,
+        reactiveTarget,
+    ) {
+        if (mode == 7) {
+            val selectedColor = AndroidColor.rgb(rgb[0], rgb[1], rgb[2]) and 0xFFFFFF
+            if (reactiveTarget == 0) reactiveIdleColor = selectedColor
+            else reactiveHighlightColor = selectedColor
+        }
         if (livePreview && ledEnabled) {
             delay(100)
             applyNow()
@@ -147,7 +167,15 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     title = {
                         Column {
                             Text("AYANEO RGB", fontWeight = FontWeight.Bold)
-                            Text("Pocket S2 Pro", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                if (deviceProfile.supportsDirectUart) {
+                                    "${deviceProfile.name} · ${deviceProfile.uartPath}"
+                                } else {
+                                    "${deviceProfile.name} · safe mode"
+                                },
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
@@ -271,21 +299,64 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 Text("Brightness ${brightness.toInt()}%", style = MaterialTheme.typography.labelLarge)
                 Slider(value = brightness, onValueChange = { brightness = it }, valueRange = 1f..100f)
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(
-                        6 to "Static",
-                        1 to "Breath",
-                        3 to "Rainbow Breath",
-                    ).forEach { (id, label) ->
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    buildList {
+                        add(6 to "Static")
+                        add(1 to "Single Breath")
+                        if (deviceProfile.supportsRgbCycle) add(2 to "RGB Breath")
+                        add(3 to "Rainbow")
+                        if (deviceProfile.supportsReactive) add(7 to "Reactive")
+                    }.forEach { (id, label) ->
                         FilterChip(
                             selected = mode == id,
                             onClick = {
                                 mode = id
                                 controller.saveMode(id)
+                                if (id == 7) {
+                                    selectArgb(
+                                        if (reactiveTarget == 0) reactiveIdleColor
+                                        else reactiveHighlightColor,
+                                    )
+                                }
                             },
                             label = { Text(label) },
                         )
                     }
+                }
+
+                if (mode == 7 && deviceProfile.supportsReactive) {
+                    Text("Reactive colours", style = MaterialTheme.typography.labelLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            Triple(0, "Idle", reactiveIdleColor),
+                            Triple(1, "Reactive", reactiveHighlightColor),
+                        ).forEach { (target, label, color) ->
+                            FilterChip(
+                                selected = reactiveTarget == target,
+                                onClick = {
+                                    reactiveTarget = target
+                                    selectArgb(color)
+                                },
+                                leadingIcon = {
+                                    Box(
+                                        Modifier
+                                            .size(18.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(color or 0xFF000000.toInt())),
+                                    )
+                                },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text(
+                        "Select Idle or Reactive, then choose its colour above.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                    )
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -305,7 +376,7 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(checked = colorCorrection, onCheckedChange = { colorCorrection = it })
                     Spacer(Modifier.width(8.dp))
-                    Text("Pocket S2 colour correction")
+                    Text("Colour correction")
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
