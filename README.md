@@ -75,8 +75,8 @@ Install the ZIP through Magisk and reboot. The module:
 | Breath | AYANEO GameWindow service |
 | Rainbow Breath | AYANEO GameWindow service |
 
-The direct UART work is groundwork for future Linux/Rocknix support. A true
-spatial rainbow that spins around each LED ring has not yet been implemented.
+A true spatial rainbow that spins around each LED ring has not yet been
+implemented.
 
 ## Safety
 
