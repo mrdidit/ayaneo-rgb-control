@@ -39,6 +39,8 @@ data class SavedRgbSettings(
     val brightness: Int = 87,
     val mode: Int = 6,
     val colorCorrection: Boolean = true,
+    val mixedGreenPercent: Int = 20,
+    val mixedBluePercent: Int = 35,
     val livePreview: Boolean = true,
     val ledEnabled: Boolean = true,
     val reactiveIdleColor: Int = 0xFF0000,
@@ -124,6 +126,8 @@ class RgbController(private val context: Context) {
         brightness = preferences.getInt("brightness", 87),
         mode = preferences.getInt("mode", 6).let { if (it == 100) 3 else it },
         colorCorrection = preferences.getBoolean("color_correction", true),
+        mixedGreenPercent = preferences.getInt("mixed_green_percent", 20),
+        mixedBluePercent = preferences.getInt("mixed_blue_percent", 35),
         livePreview = preferences.getBoolean("live_preview", true),
         ledEnabled = preferences.getBoolean("led_enabled", true),
         reactiveIdleColor = preferences.getInt("reactive_idle_color", 0xFF0000),
@@ -179,6 +183,8 @@ class RgbController(private val context: Context) {
         blue: Int,
         brightness: Int,
         colorCorrection: Boolean,
+        mixedGreenPercent: Int,
+        mixedBluePercent: Int,
         reactiveIdleColor: Int,
         reactiveHighlightColor: Int,
         persist: Boolean = true,
@@ -192,6 +198,8 @@ class RgbController(private val context: Context) {
                     .putInt("brightness", brightness)
                     .putInt("mode", mode)
                     .putBoolean("color_correction", colorCorrection)
+                    .putInt("mixed_green_percent", mixedGreenPercent)
+                    .putInt("mixed_blue_percent", mixedBluePercent)
                     .putInt("reactive_idle_color", reactiveIdleColor)
                     .putInt("reactive_highlight_color", reactiveHighlightColor)
                     .apply()
@@ -201,10 +209,12 @@ class RgbController(private val context: Context) {
                 val g = color shr 8 and 255
                 val b = color and 255
                 val correctedGreen = if (colorCorrection && r > 0 && g > 0) {
-                    (g * 0.20f).toInt().coerceAtLeast(1)
+                    (g * mixedGreenPercent.coerceIn(0, 100) / 100f).toInt()
+                        .coerceAtLeast(1)
                 } else g
                 val correctedBlue = if (colorCorrection && r > 0 && b > 0) {
-                    (b * 0.35f).toInt().coerceAtLeast(1)
+                    (b * mixedBluePercent.coerceIn(0, 100) / 100f).toInt()
+                        .coerceAtLeast(1)
                 } else b
                 return Triple(r, correctedGreen, correctedBlue)
             }

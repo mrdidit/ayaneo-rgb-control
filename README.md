@@ -6,7 +6,8 @@ AYANEO Pocket S2 / S2 Pro and Pocket EVO.
 The app provides:
 
 - a honeycomb colour picker that consumes drag gestures without scrolling the page;
-- optional corrected colour output for mixed-colour imbalance;
+- optional corrected colour output with persistent mixed-green and mixed-blue
+  calibration controls;
 - built-in and eight persistent custom-colour presets;
 - model-aware Static, Single Breath, RGB Breath, Rainbow, and Reactive modes;
 - persistent colour, brightness, mode, and LED on/off settings;

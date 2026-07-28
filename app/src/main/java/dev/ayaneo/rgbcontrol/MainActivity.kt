@@ -76,6 +76,12 @@ private fun AyaneoRgbApp(controller: RgbController) {
     var mode by remember { mutableIntStateOf(saved.mode) }
     var livePreview by remember { mutableStateOf(saved.livePreview) }
     var colorCorrection by remember { mutableStateOf(saved.colorCorrection) }
+    var mixedGreenPercent by remember {
+        mutableFloatStateOf(saved.mixedGreenPercent.toFloat())
+    }
+    var mixedBluePercent by remember {
+        mutableFloatStateOf(saved.mixedBluePercent.toFloat())
+    }
     var ledEnabled by remember { mutableStateOf(saved.ledEnabled) }
     var reactiveIdleColor by remember { mutableIntStateOf(saved.reactiveIdleColor) }
     var reactiveHighlightColor by remember { mutableIntStateOf(saved.reactiveHighlightColor) }
@@ -125,6 +131,8 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 rgb[2],
                 brightness.toInt(),
                 colorCorrection,
+                mixedGreenPercent.toInt(),
+                mixedBluePercent.toInt(),
                 reactiveIdleColor,
                 reactiveHighlightColor,
             )
@@ -140,6 +148,8 @@ private fun AyaneoRgbApp(controller: RgbController) {
         mode,
         livePreview,
         colorCorrection,
+        mixedGreenPercent,
+        mixedBluePercent,
         reactiveTarget,
     ) {
         if (mode == 7) {
@@ -429,6 +439,28 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     Switch(checked = colorCorrection, onCheckedChange = { colorCorrection = it })
                     Spacer(Modifier.width(8.dp))
                     Text("Colour correction")
+                }
+                if (colorCorrection) {
+                    Text("Mixed green strength: ${mixedGreenPercent.toInt()}%")
+                    Slider(
+                        value = mixedGreenPercent,
+                        onValueChange = { mixedGreenPercent = it },
+                        valueRange = 0f..100f,
+                        steps = 19,
+                    )
+                    Text("Mixed blue strength: ${mixedBluePercent.toInt()}%")
+                    Slider(
+                        value = mixedBluePercent,
+                        onValueChange = { mixedBluePercent = it },
+                        valueRange = 0f..100f,
+                        steps = 19,
+                    )
+                    Text(
+                        "Tune with White until the LEDs look neutral, then check Cream. " +
+                            "Pure green and blue are left unchanged.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                    )
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
