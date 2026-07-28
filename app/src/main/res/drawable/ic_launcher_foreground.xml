@@ -4,6 +4,9 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <group
+        android:translateX="-3"
+        android:translateY="6">
     <path
         android:fillColor="#FF405C"
         android:pathData="M39,27 L48,22 L57,27 L57,37 L48,42 L39,37 Z" />
@@ -29,4 +32,5 @@
         android:fillColor="#FFFFFFFF"
         android:fillAlpha="0.18"
         android:pathData="M48,43 L57,38 L66,43 L66,53 L57,58 L48,53 Z" />
+    </group>
 </vector>

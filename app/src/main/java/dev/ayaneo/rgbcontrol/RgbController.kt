@@ -40,7 +40,7 @@ data class SavedRgbSettings(
     val mode: Int = 6,
     val colorCorrection: Boolean = true,
     val mixedGreenPercent: Int = 20,
-    val mixedBluePercent: Int = 35,
+    val mixedBluePercent: Int = 20,
     val livePreview: Boolean = true,
     val ledEnabled: Boolean = true,
     val reactiveIdleColor: Int = 0xFF0000,
@@ -127,7 +127,7 @@ class RgbController(private val context: Context) {
         mode = preferences.getInt("mode", 6).let { if (it == 100) 3 else it },
         colorCorrection = preferences.getBoolean("color_correction", true),
         mixedGreenPercent = preferences.getInt("mixed_green_percent", 20),
-        mixedBluePercent = preferences.getInt("mixed_blue_percent", 35),
+        mixedBluePercent = preferences.getInt("mixed_blue_percent", 20),
         livePreview = preferences.getBoolean("live_preview", true),
         ledEnabled = preferences.getBoolean("led_enabled", true),
         reactiveIdleColor = preferences.getInt("reactive_idle_color", 0xFF0000),
@@ -140,6 +140,34 @@ class RgbController(private val context: Context) {
 
     fun saveMode(mode: Int) {
         preferences.edit().putInt("mode", mode).apply()
+    }
+
+    fun saveGlobalCalibration(greenPercent: Int, bluePercent: Int) {
+        preferences.edit()
+            .putInt("mixed_green_percent", greenPercent.coerceIn(0, 100))
+            .putInt("mixed_blue_percent", bluePercent.coerceIn(0, 100))
+            .apply()
+    }
+
+    fun loadCalibrationOverride(key: String): Pair<Int, Int>? {
+        val greenKey = "calibration_${key}_green"
+        val blueKey = "calibration_${key}_blue"
+        if (!preferences.contains(greenKey) || !preferences.contains(blueKey)) return null
+        return preferences.getInt(greenKey, 20) to preferences.getInt(blueKey, 20)
+    }
+
+    fun saveCalibrationOverride(key: String, greenPercent: Int, bluePercent: Int) {
+        preferences.edit()
+            .putInt("calibration_${key}_green", greenPercent.coerceIn(0, 100))
+            .putInt("calibration_${key}_blue", bluePercent.coerceIn(0, 100))
+            .apply()
+    }
+
+    fun clearCalibrationOverride(key: String) {
+        preferences.edit()
+            .remove("calibration_${key}_green")
+            .remove("calibration_${key}_blue")
+            .apply()
     }
 
     fun loadCustomColors(): List<Int?> =
@@ -198,8 +226,6 @@ class RgbController(private val context: Context) {
                     .putInt("brightness", brightness)
                     .putInt("mode", mode)
                     .putBoolean("color_correction", colorCorrection)
-                    .putInt("mixed_green_percent", mixedGreenPercent)
-                    .putInt("mixed_blue_percent", mixedBluePercent)
                     .putInt("reactive_idle_color", reactiveIdleColor)
                     .putInt("reactive_highlight_color", reactiveHighlightColor)
                     .apply()

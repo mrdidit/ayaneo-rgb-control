@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -29,6 +30,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Job
@@ -57,7 +59,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class RgbPreset(val name: String, val color: Color)
+private data class RgbPreset(val key: String, val name: String, val color: Color)
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -76,12 +78,17 @@ private fun AyaneoRgbApp(controller: RgbController) {
     var mode by remember { mutableIntStateOf(saved.mode) }
     var livePreview by remember { mutableStateOf(saved.livePreview) }
     var colorCorrection by remember { mutableStateOf(saved.colorCorrection) }
-    var mixedGreenPercent by remember {
+    var globalGreenPercent by remember {
         mutableFloatStateOf(saved.mixedGreenPercent.toFloat())
     }
-    var mixedBluePercent by remember {
+    var globalBluePercent by remember {
         mutableFloatStateOf(saved.mixedBluePercent.toFloat())
     }
+    var mixedGreenPercent by remember { mutableFloatStateOf(globalGreenPercent) }
+    var mixedBluePercent by remember { mutableFloatStateOf(globalBluePercent) }
+    var calibrationTargetKey by remember { mutableStateOf<String?>(null) }
+    var calibrationTargetName by remember { mutableStateOf<String?>(null) }
+    var calibrationOverrideEnabled by remember { mutableStateOf(false) }
     var ledEnabled by remember { mutableStateOf(saved.ledEnabled) }
     var reactiveIdleColor by remember { mutableIntStateOf(saved.reactiveIdleColor) }
     var reactiveHighlightColor by remember { mutableIntStateOf(saved.reactiveHighlightColor) }
@@ -94,30 +101,45 @@ private fun AyaneoRgbApp(controller: RgbController) {
 
     val presets = remember {
         listOf(
-            RgbPreset("Red", Color(0xFFFF0000)),
-            RgbPreset("Orange", Color(0xFFFF8000)),
-            RgbPreset("Green", Color(0xFF00FF00)),
-            RgbPreset("Cyan", Color(0xFF00FFFF)),
-            RgbPreset("Blue", Color(0xFF0000FF)),
-            RgbPreset("Violet", Color(0xFF8000FF)),
-            RgbPreset("Cream", Color(0xFFFFDC15)),
-            RgbPreset("White", Color.White),
+            RgbPreset("red", "Red", Color(0xFFFF0000)),
+            RgbPreset("orange", "Orange", Color(0xFFFF8000)),
+            RgbPreset("green", "Green", Color(0xFF00FF00)),
+            RgbPreset("cyan", "Cyan", Color(0xFF00FFFF)),
+            RgbPreset("blue", "Blue", Color(0xFF0000FF)),
+            RgbPreset("violet", "Violet", Color(0xFF8000FF)),
+            RgbPreset("cream", "Cream", Color(0xFFFFB820)),
+            RgbPreset("white", "White", Color.White),
         )
     }
     val customColors = remember { controller.loadCustomColors().toMutableStateList() }
 
-    fun selectArgb(color: Int) {
+    fun selectArgb(color: Int, targetKey: String? = null, targetName: String? = null) {
         val hsv = FloatArray(3)
         AndroidColor.colorToHSV(color, hsv)
         hue = hsv[0]
         saturation = hsv[1]
         value = hsv[2]
+        calibrationTargetKey = targetKey
+        calibrationTargetName = targetName
+        val calibration = targetKey?.let { controller.loadCalibrationOverride(it) }
+        calibrationOverrideEnabled = calibration != null
+        mixedGreenPercent = calibration?.first?.toFloat() ?: globalGreenPercent
+        mixedBluePercent = calibration?.second?.toFloat() ?: globalBluePercent
     }
 
     fun saveCustomColor(index: Int) {
         val color = AndroidColor.rgb(rgb[0], rgb[1], rgb[2])
         customColors[index] = color
         controller.saveCustomColor(index, color)
+        val key = "custom_$index"
+        controller.saveCalibrationOverride(
+            key,
+            mixedGreenPercent.toInt(),
+            mixedBluePercent.toInt(),
+        )
+        calibrationTargetKey = key
+        calibrationTargetName = "Custom ${index + 1}"
+        calibrationOverrideEnabled = true
         status = "Saved #${"%02X%02X%02X".format(rgb[0], rgb[1], rgb[2])} to Custom ${index + 1}"
     }
 
@@ -256,22 +278,40 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     hue = hue,
                     saturation = saturation,
                     value = value,
-                    onChange = { h, s -> hue = h; saturation = s },
+                    onChange = { h, s ->
+                        hue = h
+                        saturation = s
+                        calibrationTargetKey = null
+                        calibrationTargetName = null
+                        calibrationOverrideEnabled = false
+                        mixedGreenPercent = globalGreenPercent
+                        mixedBluePercent = globalBluePercent
+                    },
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
                         .size(280.dp),
                 )
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier
-                            .size(58.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(Color(rgb[0], rgb[1], rgb[2]))
-                            .border(1.dp, Color.White.copy(alpha = .2f), RoundedCornerShape(14.dp)),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    OutlinedTextField(
+                val selectedColor = Color(rgb[0], rgb[1], rgb[2])
+                val perceivedBrightness =
+                    rgb[0] * 0.299f + rgb[1] * 0.587f + rgb[2] * 0.114f
+                val codeTextColor =
+                    if (perceivedBrightness > 150f) Color(0xFF101116) else Color.White
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(selectedColor)
+                        .border(
+                            1.dp,
+                            codeTextColor.copy(alpha = .25f),
+                            RoundedCornerShape(14.dp),
+                        )
+                        .padding(horizontal = 16.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("#", color = codeTextColor, fontWeight = FontWeight.Bold)
+                    BasicTextField(
                         value = hexText,
                         onValueChange = { input ->
                             val clean = input.uppercase().filter { it in "0123456789ABCDEF" }.take(6)
@@ -284,16 +324,28 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                     hsv,
                                 )
                                 hue = hsv[0]; saturation = hsv[1]; value = hsv[2]
+                                calibrationTargetKey = null
+                                calibrationTargetName = null
+                                calibrationOverrideEnabled = false
+                                mixedGreenPercent = globalGreenPercent
+                                mixedBluePercent = globalBluePercent
                             }
                         },
-                        prefix = { Text("#") },
-                        label = { Text("Hex") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-                        modifier = Modifier.weight(1f),
+                        textStyle = TextStyle(
+                            color = codeTextColor,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                        ),
+                        modifier = Modifier.width(72.dp),
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Text("${rgb[0]}, ${rgb[1]}, ${rgb[2]}", fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "RGB ${rgb[0]}, ${rgb[1]}, ${rgb[2]}",
+                        color = codeTextColor,
+                        fontWeight = FontWeight.Medium,
+                    )
                 }
 
                 Text("Presets", style = MaterialTheme.typography.labelLarge)
@@ -308,7 +360,11 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                     .border(1.dp, Color.White.copy(alpha = .25f), CircleShape)
                                     .pointerInput(preset) {
                                         detectTapGestures {
-                                            selectArgb(preset.color.toArgbCompat())
+                                            selectArgb(
+                                                preset.color.toArgbCompat(),
+                                                "preset_${preset.key}",
+                                                preset.name,
+                                            )
                                         }
                                     },
                             )
@@ -342,7 +398,11 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                         detectTapGestures(
                                             onTap = {
                                                 if (customColor == null) saveCustomColor(index)
-                                                else selectArgb(customColor)
+                                                else selectArgb(
+                                                    customColor,
+                                                    "custom_$index",
+                                                    "Custom ${index + 1}",
+                                                )
                                             },
                                             onLongPress = { saveCustomColor(index) },
                                         )
@@ -441,17 +501,72 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     Text("Colour correction")
                 }
                 if (colorCorrection) {
+                    calibrationTargetKey?.let { targetKey ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Switch(
+                                checked = calibrationOverrideEnabled,
+                                onCheckedChange = { enabled ->
+                                    calibrationOverrideEnabled = enabled
+                                    if (enabled) {
+                                        controller.saveCalibrationOverride(
+                                            targetKey,
+                                            mixedGreenPercent.toInt(),
+                                            mixedBluePercent.toInt(),
+                                        )
+                                    } else {
+                                        controller.clearCalibrationOverride(targetKey)
+                                        mixedGreenPercent = globalGreenPercent
+                                        mixedBluePercent = globalBluePercent
+                                    }
+                                },
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Custom strengths for ${calibrationTargetName ?: "this colour"}")
+                        }
+                    }
                     Text("Mixed green strength: ${mixedGreenPercent.toInt()}%")
                     Slider(
                         value = mixedGreenPercent,
-                        onValueChange = { mixedGreenPercent = it },
+                        onValueChange = {
+                            mixedGreenPercent = it
+                            val targetKey = calibrationTargetKey
+                            if (calibrationOverrideEnabled && targetKey != null) {
+                                controller.saveCalibrationOverride(
+                                    targetKey,
+                                    it.toInt(),
+                                    mixedBluePercent.toInt(),
+                                )
+                            } else {
+                                globalGreenPercent = it
+                                controller.saveGlobalCalibration(
+                                    it.toInt(),
+                                    mixedBluePercent.toInt(),
+                                )
+                            }
+                        },
                         valueRange = 0f..100f,
                         steps = 19,
                     )
                     Text("Mixed blue strength: ${mixedBluePercent.toInt()}%")
                     Slider(
                         value = mixedBluePercent,
-                        onValueChange = { mixedBluePercent = it },
+                        onValueChange = {
+                            mixedBluePercent = it
+                            val targetKey = calibrationTargetKey
+                            if (calibrationOverrideEnabled && targetKey != null) {
+                                controller.saveCalibrationOverride(
+                                    targetKey,
+                                    mixedGreenPercent.toInt(),
+                                    it.toInt(),
+                                )
+                            } else {
+                                globalBluePercent = it
+                                controller.saveGlobalCalibration(
+                                    mixedGreenPercent.toInt(),
+                                    it.toInt(),
+                                )
+                            }
+                        },
                         valueRange = 0f..100f,
                         steps = 19,
                     )
