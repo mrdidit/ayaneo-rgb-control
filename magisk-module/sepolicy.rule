@@ -1,0 +1,6 @@
+type ayaneo_rgb_device dev_type
+
+allow magisk device chr_file relabelfrom
+allow magisk ayaneo_rgb_device chr_file relabelto
+allow magisk ayaneo_rgb_device chr_file { getattr open write ioctl setattr }
+allow system_app ayaneo_rgb_device chr_file { getattr open read write ioctl }
