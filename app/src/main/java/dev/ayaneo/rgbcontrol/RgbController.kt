@@ -226,7 +226,10 @@ class RgbController(private val context: Context) {
                     brightness.coerceIn(1, 100).toString()
             }
 
-            var command = values.entries.joinToString(" && ") { (file, value) ->
+            var command =
+                "mkdir -p '$CONFIG_DIR' && chown media_rw:media_rw '$CONFIG_DIR' && " +
+                    "chmod 0775 '$CONFIG_DIR' && "
+            command += values.entries.joinToString(" && ") { (file, value) ->
                 "printf '%s' '$value' > '$CONFIG_DIR/$file'"
             }
             if (mode == 6) {
@@ -300,7 +303,9 @@ class RgbController(private val context: Context) {
             ProcessBuilder(
                 "su",
                 "-c",
-                "printf '%s' '$value' > '$CONFIG_DIR/aya_rgb_is_open.conf'",
+                "mkdir -p '$CONFIG_DIR' && chown media_rw:media_rw '$CONFIG_DIR' && " +
+                    "chmod 0775 '$CONFIG_DIR' && " +
+                    "printf '%s' '$value' > '$CONFIG_DIR/aya_rgb_is_open.conf'",
             ).redirectErrorStream(true).start()
         }.getOrElse {
             return@withContext ApplyResult(false, "Could not start root shell: ${it.message}")
