@@ -240,19 +240,33 @@ class RgbController(private val context: Context) {
                     brightness.coerceIn(1, 100).toString()
             }
 
-            var command =
-                "mkdir -p '$CONFIG_DIR' && chown media_rw:media_rw '$CONFIG_DIR' && " +
-                    "chmod 0775 '$CONFIG_DIR' && "
-            command += values.entries.joinToString(" && ") { (file, value) ->
-                "printf '%s' '$value' > '$CONFIG_DIR/$file'"
-            }
-            if (mode == 6) {
+            val isKr02DirectStatic = mode == 6 && deviceProfile.usesKr02Protocol
+            val directStaticCommand = if (mode == 6) {
                 buildDirectStaticCommand(
-                    red = red.coerceIn(0, 255),
+                    red = correctedRed.coerceIn(0, 255),
                     green = correctedGreen.coerceIn(0, 255),
                     blue = correctedBlue.coerceIn(0, 255),
                     brightness = brightness.coerceIn(1, 100),
-                )?.let { command += " && $it" }
+                )
+            } else null
+            val command = if (isKr02DirectStatic) {
+                // KR02 GameWindow generates its own software light commands. Stop that
+                // writer before issuing our direct Static packet to avoid a UART race.
+                sendRgbMessage("com_set_rgb_is_open:false")
+                Thread.sleep(100)
+                directStaticCommand ?: return@withContext ApplyResult(
+                    false,
+                    "Pocket FIT Elite Static command is unavailable",
+                )
+            } else {
+                var configCommand =
+                    "mkdir -p '$CONFIG_DIR' && chown media_rw:media_rw '$CONFIG_DIR' && " +
+                        "chmod 0775 '$CONFIG_DIR' && "
+                configCommand += values.entries.joinToString(" && ") { (file, value) ->
+                    "printf '%s' '$value' > '$CONFIG_DIR/$file'"
+                }
+                directStaticCommand?.let { configCommand += " && $it" }
+                configCommand
             }
             val process = runCatching {
                 ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
@@ -265,7 +279,7 @@ class RgbController(private val context: Context) {
                 return@withContext ApplyResult(false, output.ifBlank { "Root write failed" })
             }
 
-            val sent = sendApplyMessage()
+            val sent = if (isKr02DirectStatic) true else sendApplyMessage()
             logEvent(
                 "Apply mode=$mode rgb=$red,$green,$blue corrected=" +
                     "$correctedRed,$correctedGreen,$correctedBlue brightness=$brightness " +

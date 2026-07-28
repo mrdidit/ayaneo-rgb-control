@@ -27,7 +27,8 @@ The app selects a verified profile from Android's device identity:
 Direct Static control uses the selected UART at 115200 baud with a 27-byte
 register packet captured from AYANEO GameWindow. Pocket FIT Elite uses the
 separate 11-byte KR02 light command recovered from its installed GameWindow
-package. Unknown devices enter safe
+package. For KR02 Static, the app first stops GameWindow's software RGB writer
+to prevent both applications from racing on the same UART. Unknown devices enter safe
 mode: configuration integration remains available, but direct UART output is
 disabled until a verified profile is added.
 
