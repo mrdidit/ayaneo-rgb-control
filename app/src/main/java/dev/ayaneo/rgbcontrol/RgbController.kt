@@ -16,6 +16,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlin.math.roundToInt
 
 data class ApplyResult(val success: Boolean, val message: String)
 data class DeviceProfile(
@@ -25,9 +26,10 @@ data class DeviceProfile(
     val protocolSelector: Int?,
     val supportsRgbCycle: Boolean,
     val supportsReactive: Boolean,
+    val usesKr02Protocol: Boolean = false,
 ) {
     val supportsDirectUart: Boolean
-        get() = uartPath != null && protocolSelector != null
+        get() = uartPath != null && (protocolSelector != null || usesKr02Protocol)
 }
 
 data class SavedRgbSettings(
@@ -68,6 +70,15 @@ class RgbController(private val context: Context) {
                 protocolSelector = 0x02,
                 supportsRgbCycle = true,
                 supportsReactive = true,
+            ),
+            DeviceProfile(
+                name = "Pocket FIT Elite",
+                deviceNames = setOf("PocketFITElite"),
+                uartPath = "/dev/ttyHS1",
+                protocolSelector = null,
+                supportsRgbCycle = false,
+                supportsReactive = false,
+                usesKr02Protocol = true,
             ),
         )
     }
@@ -277,6 +288,26 @@ class RgbController(private val context: Context) {
         brightness: Int,
     ): String? {
         val uartPath = deviceProfile.uartPath ?: return null
+        if (deviceProfile.usesKr02Protocol) {
+            val stockBrightness = brightness.coerceIn(1, 100) * 255 / 100
+            fun kr02Channel(channel: Int): Int {
+                val scaled = (channel.coerceIn(0, 255) * stockBrightness * 0.6f / 255f)
+                    .toInt()
+                    .coerceIn(0, 99)
+                return (33.0 + scaled * (120.0 / 99.0)).roundToInt()
+            }
+            val packet = intArrayOf(
+                0xF7, 0x01,
+                kr02Channel(red),
+                kr02Channel(green),
+                kr02Channel(blue),
+                0x00, 0x00, 0x00, 0x00,
+                0x00, 0xED,
+            )
+            packet[9] = (1..7).sumOf { packet[it] } and 0xFF
+            val escaped = packet.joinToString(separator = "") { "\\%03o".format(it) }
+            return "printf '$escaped' > '$uartPath'"
+        }
         val selector = deviceProfile.protocolSelector ?: return null
         val level = (brightness * 255 / 100).coerceIn(1, 255)
         val packet = intArrayOf(
@@ -371,7 +402,8 @@ class RgbController(private val context: Context) {
 
             selected_profile=${deviceProfile.name}
             uart_path=${deviceProfile.uartPath ?: "disabled"}
-            protocol_selector=${deviceProfile.protocolSelector?.let { "0x%02X".format(it) } ?: "unknown"}
+            protocol=${if (deviceProfile.usesKr02Protocol) "KR02-11-byte" else "selector-" +
+                (deviceProfile.protocolSelector?.let { "0x%02X".format(it) } ?: "unknown")}
             direct_uart_enabled=${deviceProfile.supportsDirectUart}
             rgb_cycle_advertised=${deviceProfile.supportsRgbCycle}
             reactive_advertised=${deviceProfile.supportsReactive}
