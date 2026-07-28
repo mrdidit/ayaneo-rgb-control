@@ -15,6 +15,13 @@ The app provides:
 - AYANEO GameWindow integration for animated modes on S2 and EVO;
 - exportable diagnostics for identifying and researching unknown devices.
 
+## Pocket FIT Elite screenshots
+
+<p align="center">
+  <img src="docs/screenshots/fit-elite-01.png" width="45%" alt="AYANEO RGB Control colour picker and presets on Pocket FIT Elite">
+  <img src="docs/screenshots/fit-elite-02.png" width="45%" alt="AYANEO RGB Control modes and calibration controls on Pocket FIT Elite">
+</p>
+
 ## Hardware support
 
 The app selects a verified profile from Android's device identity:
