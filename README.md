@@ -12,6 +12,7 @@ The app provides:
 - persistent colour, brightness, mode, and LED on/off settings;
 - direct UART output for Static mode;
 - AYANEO GameWindow integration for the stock animated modes.
+- copyable diagnostics for identifying and researching unknown devices.
 
 ## Hardware support
 
@@ -26,6 +27,14 @@ Direct Static control uses the selected UART at 115200 baud with a 27-byte
 register packet captured from AYANEO GameWindow. Unknown devices enter safe
 mode: configuration integration remains available, but direct UART output is
 disabled until a verified profile is added.
+
+The **Copy diagnostics** button creates a plain-text report containing the
+Android hardware identity, selected safety profile, GameWindow version, recent
+apply/IPC results, candidate UART metadata, and any UART descriptor currently
+owned by GameWindow. The root probe is read-only and never sends a UART packet.
+The report intentionally excludes the device serial number. It can identify a
+likely UART and protocol family, but actual packet capture still requires a
+separate controlled trace.
 
 ## Why colour correction is needed
 

@@ -9,6 +9,9 @@ import android.os.IBinder
 import android.os.Parcel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class ApplyResult(val success: Boolean, val message: String)
 data class DeviceProfile(
@@ -78,8 +81,26 @@ class RgbController(private val context: Context) {
 
     @Volatile
     private var binder: IBinder? = null
+    private val eventLog = ArrayDeque<String>()
     private val preferences =
         context.getSharedPreferences("rgb_settings", Context.MODE_PRIVATE)
+
+    init {
+        logEvent(
+            "Detected ${Build.MANUFACTURER} ${Build.MODEL} " +
+                "(device=${Build.DEVICE}, profile=${deviceProfile.name}, " +
+                "directUart=${deviceProfile.supportsDirectUart})",
+        )
+    }
+
+    private fun logEvent(message: String) {
+        synchronized(eventLog) {
+            if (eventLog.size >= 40) eventLog.removeFirst()
+            eventLog.addLast(
+                "${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())} $message",
+            )
+        }
+    }
 
     fun loadSettings(): SavedRgbSettings = SavedRgbSettings(
         red = preferences.getInt("red", 255),
@@ -222,10 +243,17 @@ class RgbController(private val context: Context) {
             }
             val output = process.inputStream.bufferedReader().readText().trim()
             if (process.waitFor() != 0) {
+                logEvent("Apply mode=$mode failed: ${output.ifBlank { "root write failed" }}")
                 return@withContext ApplyResult(false, output.ifBlank { "Root write failed" })
             }
 
             val sent = sendApplyMessage()
+            logEvent(
+                "Apply mode=$mode rgb=$red,$green,$blue corrected=" +
+                    "$correctedRed,$correctedGreen,$correctedBlue brightness=$brightness " +
+                    "uart=${if (mode == 6 && deviceProfile.supportsDirectUart) deviceProfile.uartPath else "none"} " +
+                    "ipc=$sent",
+            )
             ApplyResult(
                 sent,
                 if (sent && mode == 6 && !deviceProfile.supportsDirectUart) {
@@ -278,10 +306,77 @@ class RgbController(private val context: Context) {
         }
         val output = process.inputStream.bufferedReader().readText().trim()
         if (process.waitFor() != 0) {
+            logEvent("LED enabled=$enabled failed: ${output.ifBlank { "root write failed" }}")
             return@withContext ApplyResult(false, output.ifBlank { "LED state write failed" })
         }
         val sent = sendRgbMessage("com_set_rgb_is_open:$value")
+        logEvent("LED enabled=$enabled ipc=$sent")
         ApplyResult(sent, if (sent) "LEDs ${if (enabled) "on" else "off"}" else "Saved LED state; IPC unavailable")
+    }
+
+    suspend fun collectDiagnostics(): String = withContext(Dispatchers.IO) {
+        val packageManager = context.packageManager
+        val appVersion = runCatching {
+            packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull() ?: "unknown"
+        val gameWindowVersion = runCatching {
+            packageManager.getPackageInfo(GAMEWINDOW_PACKAGE, 0).versionName
+        }.getOrNull() ?: "not installed"
+        val recentEvents = synchronized(eventLog) {
+            if (eventLog.isEmpty()) "(none)" else eventLog.joinToString("\n")
+        }
+        val rootCommand = """
+            echo "root_id=$(id)"
+            echo "gamewindow_pid=$(pidof $GAMEWINDOW_PACKAGE)"
+            echo "--- candidate UART nodes ---"
+            ls -lZ /dev/ttyHS* 2>&1
+            echo "--- GameWindow UART descriptors ---"
+            ls -l /proc/$(pidof $GAMEWINDOW_PACKAGE)/fd 2>&1 | grep '/dev/ttyHS' || true
+            echo "--- RGB configuration files ---"
+            ls -lZ $CONFIG_DIR/aya_rgb*.conf 2>&1
+        """.trimIndent()
+        val rootProbe = runCatching {
+            val process = ProcessBuilder("su", "-c", rootCommand)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().readText().trim()
+            val exitCode = process.waitFor()
+            "exit=$exitCode\n${output.ifBlank { "(no output)" }}"
+        }.getOrElse { "unavailable: ${it.javaClass.simpleName}: ${it.message}" }
+
+        """
+            AYANEO RGB Control diagnostics
+            generated=${SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(Date())}
+            app_version=$appVersion
+            package=${context.packageName}
+
+            manufacturer=${Build.MANUFACTURER}
+            brand=${Build.BRAND}
+            model=${Build.MODEL}
+            device=${Build.DEVICE}
+            product=${Build.PRODUCT}
+            board=${Build.BOARD}
+            hardware=${Build.HARDWARE}
+            android=${Build.VERSION.RELEASE}
+            sdk=${Build.VERSION.SDK_INT}
+
+            selected_profile=${deviceProfile.name}
+            uart_path=${deviceProfile.uartPath ?: "disabled"}
+            protocol_selector=${deviceProfile.protocolSelector?.let { "0x%02X".format(it) } ?: "unknown"}
+            direct_uart_enabled=${deviceProfile.supportsDirectUart}
+            rgb_cycle_advertised=${deviceProfile.supportsRgbCycle}
+            reactive_advertised=${deviceProfile.supportsReactive}
+            gamewindow_version=$gameWindowVersion
+            gamewindow_ipc_connected=${binder != null}
+
+            --- recent app events ---
+            $recentEvents
+
+            --- read-only root probe ---
+            $rootProbe
+
+            Note: this report does not write to a UART and does not capture packet bytes.
+        """.trimIndent()
     }
 
     private fun sendApplyMessage(): Boolean =

@@ -2,6 +2,9 @@ package dev.ayaneo.rgbcontrol
 
 import android.graphics.Color as AndroidColor
 import android.os.Bundle
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
@@ -27,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -62,6 +66,7 @@ private data class RgbPreset(val name: String, val color: Color)
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun AyaneoRgbApp(controller: RgbController) {
+    val context = LocalContext.current
     val deviceProfile = remember { controller.deviceProfile }
     val saved = remember { controller.loadSettings() }
     val savedHsv = remember(saved) {
@@ -397,8 +402,23 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 Text(
                     status,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 12.dp),
                 )
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            val report = controller.collectDiagnostics()
+                            val clipboard =
+                                context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(
+                                ClipData.newPlainText("AYANEO RGB diagnostics", report),
+                            )
+                            status = "Diagnostics copied to clipboard"
+                        }
+                    },
+                    modifier = Modifier.padding(bottom = 12.dp),
+                ) {
+                    Text("Copy diagnostics")
+                }
             }
         }
     }
