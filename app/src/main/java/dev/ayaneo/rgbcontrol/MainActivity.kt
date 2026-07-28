@@ -206,11 +206,11 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                     "until its device node and protocol are verified.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Text("1. Select Static in this app.")
-                            Text("2. Select the Green preset (#00FF00), tap Apply, and note what you see.")
-                            Text("3. Select the Blue preset (#0000FF), tap Apply, and note what you see.")
+                            Text("1. Open AYANEO's stock RGB controls and select Static.")
+                            Text("2. Select a clear green and note what you see.")
+                            Text("3. Select a clear blue and note what you see.")
                             Text("4. Export the diagnostics bundle.")
-                            Text("5. Send both exported text files from the AYARGB folder.")
+                            Text("5. Send the exported text file from the AYARGB folder.")
                             Text(
                                 "The report is read-only and does not capture UART packet bytes. " +
                                     "A developer may arrange a separate controlled trace afterward. " +

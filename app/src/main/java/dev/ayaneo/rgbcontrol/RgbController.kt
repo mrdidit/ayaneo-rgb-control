@@ -390,39 +390,36 @@ class RgbController(private val context: Context) {
         val safeDevice = Build.DEVICE.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val baseName = "$timestamp-$safeDevice"
         val reportFile = File(context.cacheDir, "$baseName-diagnostics.txt")
-        val notesFile = File(context.cacheDir, "$baseName-test-notes.txt")
-        reportFile.writeText(collectDiagnostics())
-        notesFile.writeText(
+        val report = collectDiagnostics()
+        val testNotes =
             """
+
                 Unknown AYANEO RGB device test
                 Model: ${Build.MODEL}
                 Device: ${Build.DEVICE}
 
-                In AYANEO RGB Control safe mode:
+                In AYANEO's stock RGB controls:
                 1. Select Static.
-                2. Select the Green preset (#00FF00), tap Apply, and record its appearance.
-                3. Select the Blue preset (#0000FF), tap Apply, and record its appearance.
-                4. Direct UART remains disabled throughout this test.
+                2. Select a clear green and record its appearance.
+                3. Select a clear blue and record its appearance.
 
-                #00FF00 appeared as:
+                Green appeared as:
 
-                #0000FF appeared as:
+                Blue appeared as:
 
                 Other available stock modes:
 
                 Additional notes:
-            """.trimIndent(),
-        )
+            """.trimIndent()
+        reportFile.writeText("$report\n\n$testNotes\n")
 
         val exportDir = "/data/media/0/AYARGB"
         val reportTarget = "$exportDir/${reportFile.name}"
-        val notesTarget = "$exportDir/${notesFile.name}"
         val command =
             "mkdir -p '$exportDir' && " +
                 "cp '${reportFile.absolutePath}' '$reportTarget' && " +
-                "cp '${notesFile.absolutePath}' '$notesTarget' && " +
-                "chown media_rw:media_rw '$exportDir' '$reportTarget' '$notesTarget' && " +
-                "chmod 775 '$exportDir' && chmod 664 '$reportTarget' '$notesTarget'"
+                "chown media_rw:media_rw '$exportDir' '$reportTarget' && " +
+                "chmod 775 '$exportDir' && chmod 664 '$reportTarget'"
         val process = runCatching {
             ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
         }.getOrElse {
@@ -435,10 +432,10 @@ class RgbController(private val context: Context) {
                 output.ifBlank { "Diagnostics export failed" },
             )
         }
-        logEvent("Exported diagnostics bundle to /storage/emulated/0/AYARGB")
+        logEvent("Exported diagnostics report to /storage/emulated/0/AYARGB")
         ApplyResult(
             true,
-            "Exported ${reportFile.name} and ${notesFile.name} to /storage/emulated/0/AYARGB",
+            "Exported ${reportFile.name} to /storage/emulated/0/AYARGB",
         )
     }
 
