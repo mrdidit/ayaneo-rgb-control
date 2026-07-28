@@ -181,6 +181,26 @@ class RgbController(private val context: Context) {
             .apply()
     }
 
+    fun correctedRgb(
+        red: Int,
+        green: Int,
+        blue: Int,
+        colorCorrection: Boolean,
+        mixedGreenPercent: Int,
+        mixedBluePercent: Int,
+    ): IntArray {
+        val r = red.coerceIn(0, 255)
+        val g = green.coerceIn(0, 255)
+        val b = blue.coerceIn(0, 255)
+        val correctedGreen = if (colorCorrection && r > 0 && g > 0) {
+            (g * mixedGreenPercent.coerceIn(0, 100) / 100f).toInt().coerceAtLeast(1)
+        } else g
+        val correctedBlue = if (colorCorrection && r > 0 && b > 0) {
+            (b * mixedBluePercent.coerceIn(0, 100) / 100f).toInt().coerceAtLeast(1)
+        } else b
+        return intArrayOf(r, correctedGreen, correctedBlue)
+    }
+
     fun loadCustomColors(): List<Int?> =
         List(8) { index ->
             val key = "custom_color_$index"
@@ -280,44 +300,48 @@ class RgbController(private val context: Context) {
                     .putInt("reactive_highlight_color", reactiveHighlightColor)
                     .apply()
             }
-            fun corrected(color: Int): Triple<Int, Int, Int> {
-                val r = color shr 16 and 255
-                val g = color shr 8 and 255
-                val b = color and 255
-                val correctedGreen = if (colorCorrection && r > 0 && g > 0) {
-                    (g * mixedGreenPercent.coerceIn(0, 100) / 100f).toInt()
-                        .coerceAtLeast(1)
-                } else g
-                val correctedBlue = if (colorCorrection && r > 0 && b > 0) {
-                    (b * mixedBluePercent.coerceIn(0, 100) / 100f).toInt()
-                        .coerceAtLeast(1)
-                } else b
-                return Triple(r, correctedGreen, correctedBlue)
+            fun corrected(color: Int): IntArray {
+                return correctedRgb(
+                    red = color shr 16 and 255,
+                    green = color shr 8 and 255,
+                    blue = color and 255,
+                    colorCorrection = colorCorrection,
+                    mixedGreenPercent = mixedGreenPercent,
+                    mixedBluePercent = mixedBluePercent,
+                )
             }
             val (correctedRed, correctedGreen, correctedBlue) =
                 corrected((red shl 16) or (green shl 8) or blue)
             val colorFile = when (mode) {
-                3 -> "aya_rgb_breath_single_mode_color.conf"
+                1 -> "aya_rgb_breath_single_mode_color.conf"
+                3 -> null
                 6 -> "aya_rgb_single_mode_color.conf"
                 else -> "aya_rgb_default_mode_color.conf"
             }
             val brightnessFile = when (mode) {
-                3 -> "aya_rgb_breath_single_mode_bright.conf"
+                1 -> "aya_rgb_breath_single_mode_bright.conf"
+                3 -> null
                 6 -> "aya_rgb_single_mode_bright.conf"
                 else -> "aya_rgb_default_mode_bright.conf"
             }
             val values = mutableMapOf(
-                "aya_rgb_mode.conf" to mode.toString(),
                 "aya_rgb_is_open.conf" to "true",
-                colorFile to "$correctedRed,$correctedGreen,$correctedBlue",
-                brightnessFile to brightness.coerceIn(1, 100).toString(),
             )
+            colorFile?.let {
+                values[it] = "$correctedRed,$correctedGreen,$correctedBlue"
+            }
+            brightnessFile?.let {
+                values[it] = brightness.coerceIn(1, 100).toString()
+            }
+            // Write the mode last. GameWindow's file observer can immediately restart
+            // the current effect when a colour or brightness file changes.
+            values["aya_rgb_mode.conf"] = mode.toString()
             if (mode == 7 && deviceProfile.supportsReactive) {
                 val (idleRed, idleGreen, idleBlue) = corrected(reactiveIdleColor)
                 val (highlightRed, highlightGreen, highlightBlue) =
                     corrected(reactiveHighlightColor)
-                values.remove(colorFile)
-                values.remove(brightnessFile)
+                colorFile?.let { values.remove(it) }
+                brightnessFile?.let { values.remove(it) }
                 values["aya_rgb_follow_mode_back_color.conf"] =
                     "$idleRed,$idleGreen,$idleBlue"
                 values["aya_rgb_follow_mode_front_color.conf"] =
@@ -339,7 +363,9 @@ class RgbController(private val context: Context) {
                 // KR02 GameWindow generates its own software light commands. Stop that
                 // writer before issuing our direct Static packet to avoid a UART race.
                 sendRgbMessage("com_set_rgb_is_open:false")
-                Thread.sleep(100)
+                // Its shutdown coroutine sleeps for 100 ms before completing the serial
+                // cleanup. Leave enough margin so its off packet cannot overtake Static.
+                Thread.sleep(350)
                 directStaticCommand ?: return@withContext ApplyResult(
                     false,
                     "Pocket FIT Elite Static command is unavailable",
@@ -363,7 +389,14 @@ class RgbController(private val context: Context) {
                 return@withContext ApplyResult(false, output.ifBlank { "Root write failed" })
             }
 
-            val sent = if (isKr02DirectStatic) true else sendApplyMessage()
+            val sent = if (isKr02DirectStatic) {
+                true
+            } else {
+                // Mode 2-5 changes are not dispatched by GameWindow's file observer.
+                // Let it consume the new mode before asking its open path to start it.
+                if (deviceProfile.usesKr02Protocol) Thread.sleep(200)
+                sendApplyMessage()
+            }
             logEvent(
                 "Apply mode=$mode rgb=$red,$green,$blue corrected=" +
                     "$correctedRed,$correctedGreen,$correctedBlue brightness=$brightness " +

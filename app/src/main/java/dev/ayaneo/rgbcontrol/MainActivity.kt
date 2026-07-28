@@ -348,6 +348,53 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     )
                 }
 
+                val hardwareRgb = controller.correctedRgb(
+                    red = rgb[0],
+                    green = rgb[1],
+                    blue = rgb[2],
+                    colorCorrection = colorCorrection,
+                    mixedGreenPercent = mixedGreenPercent.toInt(),
+                    mixedBluePercent = mixedBluePercent.toInt(),
+                )
+                val hardwareColor = Color(hardwareRgb[0], hardwareRgb[1], hardwareRgb[2])
+                val hardwareBrightness =
+                    hardwareRgb[0] * 0.299f +
+                        hardwareRgb[1] * 0.587f +
+                        hardwareRgb[2] * 0.114f
+                val hardwareTextColor =
+                    if (hardwareBrightness > 150f) Color(0xFF101116) else Color.White
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(hardwareColor)
+                        .border(
+                            1.dp,
+                            hardwareTextColor.copy(alpha = .25f),
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Hardware output",
+                        color = hardwareTextColor,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "#${"%02X%02X%02X".format(
+                            hardwareRgb[0],
+                            hardwareRgb[1],
+                            hardwareRgb[2],
+                        )} · RGB ${hardwareRgb[0]}, ${hardwareRgb[1]}, ${hardwareRgb[2]}",
+                        color = hardwareTextColor,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+
                 Text("Presets", style = MaterialTheme.typography.labelLarge)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(presets) { preset ->
