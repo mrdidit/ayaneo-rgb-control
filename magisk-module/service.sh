@@ -9,6 +9,9 @@ case "$DEVICE" in
     PocketEVO)
         RGB_UART=/dev/ttyHS4
         ;;
+    PocketFITElite)
+        RGB_UART=/dev/ttyHS1
+        ;;
     *)
         # Unknown hardware: do not change permissions on any UART.
         exit 0

@@ -1,6 +1,6 @@
 id=ayaneo_rgb_uart
 name=AYANEO RGB UART Access
-version=1.1
-versionCode=2
+version=1.2
+versionCode=3
 author=AYANEO RGB Control
-description=Device-aware direct RGB UART access for Pocket S2 and Pocket EVO.
+description=Device-aware direct RGB UART access for Pocket S2, Pocket EVO, and Pocket FIT Elite.
