@@ -28,7 +28,10 @@ register packet captured from AYANEO GameWindow. Unknown devices enter safe
 mode: configuration integration remains available, but direct UART output is
 disabled until a verified profile is added.
 
-The **Copy diagnostics** button creates a plain-text report containing the
+The **Export diagnostics** button creates a report bundle under
+`/storage/emulated/0/AYARGB/`, where it can be retrieved through normal USB
+file transfer. The bundle contains a plain-text diagnostics report and a test
+notes template. The report includes the
 Android hardware identity, selected safety profile, GameWindow version, recent
 apply/IPC results, candidate UART metadata, and any UART descriptor currently
 owned by GameWindow. The root probe is read-only and never sends a UART packet.
@@ -39,11 +42,11 @@ separate controlled trace.
 Unknown devices also receive an in-app **Help add this device** guide. It keeps
 direct UART disabled and asks the tester to:
 
-1. open the stock RGB screen on Static so GameWindow exposes its active UART;
-2. copy the read-only diagnostics;
-3. test fixed `#00FF00` green and `#0000FF` blue in the stock app;
-4. copy a prepared observation template; and
-5. send both items to the developer before any controlled packet trace.
+1. select Static in this app;
+2. apply exact `#00FF00` green and `#0000FF` blue using the built-in presets;
+3. record how the physical LEDs appear;
+4. export the diagnostics bundle; and
+5. send both exported files before any controlled packet trace.
 
 The guide explicitly warns users not to experiment with UART nodes manually.
 

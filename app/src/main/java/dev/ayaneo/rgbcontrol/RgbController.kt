@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.io.File
 
 data class ApplyResult(val success: Boolean, val message: String)
 data class DeviceProfile(
@@ -377,6 +378,63 @@ class RgbController(private val context: Context) {
 
             Note: this report does not write to a UART and does not capture packet bytes.
         """.trimIndent()
+    }
+
+    suspend fun exportDiagnosticsBundle(): ApplyResult = withContext(Dispatchers.IO) {
+        val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val safeDevice = Build.DEVICE.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val baseName = "$timestamp-$safeDevice"
+        val reportFile = File(context.cacheDir, "$baseName-diagnostics.txt")
+        val notesFile = File(context.cacheDir, "$baseName-test-notes.txt")
+        reportFile.writeText(collectDiagnostics())
+        notesFile.writeText(
+            """
+                Unknown AYANEO RGB device test
+                Model: ${Build.MODEL}
+                Device: ${Build.DEVICE}
+
+                In AYANEO RGB Control safe mode:
+                1. Select Static.
+                2. Select the Green preset (#00FF00), tap Apply, and record its appearance.
+                3. Select the Blue preset (#0000FF), tap Apply, and record its appearance.
+                4. Direct UART remains disabled throughout this test.
+
+                #00FF00 appeared as:
+
+                #0000FF appeared as:
+
+                Other available stock modes:
+
+                Additional notes:
+            """.trimIndent(),
+        )
+
+        val exportDir = "/data/media/0/AYARGB"
+        val reportTarget = "$exportDir/${reportFile.name}"
+        val notesTarget = "$exportDir/${notesFile.name}"
+        val command =
+            "mkdir -p '$exportDir' && " +
+                "cp '${reportFile.absolutePath}' '$reportTarget' && " +
+                "cp '${notesFile.absolutePath}' '$notesTarget' && " +
+                "chown media_rw:media_rw '$exportDir' '$reportTarget' '$notesTarget' && " +
+                "chmod 775 '$exportDir' && chmod 664 '$reportTarget' '$notesTarget'"
+        val process = runCatching {
+            ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
+        }.getOrElse {
+            return@withContext ApplyResult(false, "Could not start root export: ${it.message}")
+        }
+        val output = process.inputStream.bufferedReader().readText().trim()
+        if (process.waitFor() != 0) {
+            return@withContext ApplyResult(
+                false,
+                output.ifBlank { "Diagnostics export failed" },
+            )
+        }
+        logEvent("Exported diagnostics bundle to /storage/emulated/0/AYARGB")
+        ApplyResult(
+            true,
+            "Exported ${reportFile.name} and ${notesFile.name} to /storage/emulated/0/AYARGB",
+        )
     }
 
     private fun sendApplyMessage(): Boolean =

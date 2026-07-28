@@ -217,11 +217,11 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                     "until its device node and protocol are verified.",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                            Text("1. Open AYANEO's stock RGB effects screen and select Static.")
-                            Text("2. Return here and copy the diagnostics report.")
-                            Text("3. In the stock app, test pure green #00FF00 and note what you see.")
-                            Text("4. Test pure blue #0000FF and note what you see.")
-                            Text("5. Send the diagnostics and colour observations to the developer.")
+                            Text("1. Select Static in this app.")
+                            Text("2. Select the Green preset (#00FF00), tap Apply, and note what you see.")
+                            Text("3. Select the Blue preset (#0000FF), tap Apply, and note what you see.")
+                            Text("4. Export the diagnostics bundle.")
+                            Text("5. Send both exported text files from the AYARGB folder.")
                             Text(
                                 "The report is read-only and does not capture UART packet bytes. " +
                                     "A developer may arrange a separate controlled trace afterward. " +
@@ -247,21 +247,13 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                 }
                                 OutlinedButton(
                                     onClick = {
-                                        copyToClipboard(
-                                            "AYANEO RGB test template",
-                                            """
-                                                Unknown AYANEO RGB device test
-                                                Model: ${deviceProfile.name}
-                                                Stock Static #00FF00 appeared as:
-                                                Stock Static #0000FF appeared as:
-                                                Other available stock modes:
-                                                Notes:
-                                            """.trimIndent(),
-                                        )
-                                        status = "Test template copied to clipboard"
+                                        scope.launch {
+                                            status = "Exporting diagnostics…"
+                                            status = controller.exportDiagnosticsBundle().message
+                                        }
                                     },
                                 ) {
-                                    Text("Copy test template")
+                                    Text("Export to AYARGB")
                                 }
                             }
                         }
@@ -479,14 +471,13 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 OutlinedButton(
                     onClick = {
                         scope.launch {
-                            val report = controller.collectDiagnostics()
-                            copyToClipboard("AYANEO RGB diagnostics", report)
-                            status = "Diagnostics copied to clipboard"
+                            status = "Exporting diagnostics…"
+                            status = controller.exportDiagnosticsBundle().message
                         }
                     },
                     modifier = Modifier.padding(bottom = 12.dp),
                 ) {
-                    Text("Copy diagnostics")
+                    Text("Export diagnostics")
                 }
             }
         }
