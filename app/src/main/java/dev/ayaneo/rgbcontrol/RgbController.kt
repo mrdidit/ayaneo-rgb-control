@@ -14,11 +14,18 @@ import java.util.Date
 import java.util.Locale
 import java.io.File
 import java.io.FileOutputStream
+import java.io.BufferedReader
+import java.io.BufferedWriter
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.math.roundToInt
 
 data class ApplyResult(val success: Boolean, val message: String)
+private data class RootResult(val exitCode: Int, val output: String)
+
 data class DeviceProfile(
     val name: String,
     val deviceNames: Set<String>,
@@ -98,6 +105,10 @@ class RgbController(private val context: Context) {
 
     @Volatile
     private var binder: IBinder? = null
+    private var rootProcess: Process? = null
+    private var rootInput: BufferedWriter? = null
+    private var rootOutput: BufferedReader? = null
+    private val rootCommandId = AtomicLong()
     private val eventLog = ArrayDeque<String>()
     private val preferences =
         context.getSharedPreferences("rgb_settings", Context.MODE_PRIVATE)
@@ -202,6 +213,45 @@ class RgbController(private val context: Context) {
     fun unbind() {
         runCatching { context.unbindService(connection) }
         binder = null
+        closeRootShell()
+    }
+
+    @Synchronized
+    private fun closeRootShell() {
+        runCatching { rootInput?.apply { write("exit\n"); flush() } }
+        runCatching { rootProcess?.destroy() }
+        rootInput = null
+        rootOutput = null
+        rootProcess = null
+    }
+
+    @Synchronized
+    private fun runAsRoot(command: String): RootResult {
+        if (rootProcess?.isAlive != true) {
+            closeRootShell()
+            val process = ProcessBuilder("su").redirectErrorStream(true).start()
+            rootProcess = process
+            rootInput = BufferedWriter(OutputStreamWriter(process.outputStream))
+            rootOutput = BufferedReader(InputStreamReader(process.inputStream))
+        }
+        val input = rootInput ?: error("Root shell input is unavailable")
+        val output = rootOutput ?: error("Root shell output is unavailable")
+        val marker = "__AYARGB_ROOT_${rootCommandId.incrementAndGet()}__"
+        input.write(command)
+        input.write("\naya_rgb_rc=\$?\nprintf '\\n$marker:%s\\n' \"\$aya_rgb_rc\"\n")
+        input.flush()
+
+        val lines = mutableListOf<String>()
+        while (true) {
+            val line = output.readLine() ?: error("Root shell closed unexpectedly")
+            if (line.startsWith("$marker:")) {
+                return RootResult(
+                    exitCode = line.substringAfter(':').toIntOrNull() ?: 1,
+                    output = lines.joinToString("\n").trim(),
+                )
+            }
+            lines += line
+        }
     }
 
     suspend fun apply(
@@ -304,13 +354,11 @@ class RgbController(private val context: Context) {
                 directStaticCommand?.let { configCommand += " && $it" }
                 configCommand
             }
-            val process = runCatching {
-                ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
-            }.getOrElse {
+            val rootResult = runCatching { runAsRoot(command) }.getOrElse {
                 return@withContext ApplyResult(false, "Could not start root shell: ${it.message}")
             }
-            val output = process.inputStream.bufferedReader().readText().trim()
-            if (process.waitFor() != 0) {
+            if (rootResult.exitCode != 0) {
+                val output = rootResult.output
                 logEvent("Apply mode=$mode failed: ${output.ifBlank { "root write failed" }}")
                 return@withContext ApplyResult(false, output.ifBlank { "Root write failed" })
             }
@@ -383,25 +431,38 @@ class RgbController(private val context: Context) {
     suspend fun setLedEnabled(enabled: Boolean): ApplyResult = withContext(Dispatchers.IO) {
         preferences.edit().putBoolean("led_enabled", enabled).apply()
         val value = enabled.toString()
-        val process = runCatching {
-            ProcessBuilder(
-                "su",
-                "-c",
-                "mkdir -p '$CONFIG_DIR' && chown media_rw:media_rw '$CONFIG_DIR' && " +
-                    "chmod 0775 '$CONFIG_DIR' && " +
-                    "printf '%s' '$value' > '$CONFIG_DIR/aya_rgb_is_open.conf'",
-            ).redirectErrorStream(true).start()
+        if (!enabled) sendRgbMessage("com_set_rgb_is_open:false")
+        var command =
+            "mkdir -p '$CONFIG_DIR' && chown media_rw:media_rw '$CONFIG_DIR' && " +
+                "chmod 0775 '$CONFIG_DIR' && " +
+                "printf '%s' '$value' > '$CONFIG_DIR/aya_rgb_is_open.conf'"
+        if (!enabled && deviceProfile.usesKr02Protocol) {
+            buildKr02ShutdownCommand()?.let { command += " && $it" }
+        }
+        val rootResult = runCatching {
+            runAsRoot(command)
         }.getOrElse {
             return@withContext ApplyResult(false, "Could not start root shell: ${it.message}")
         }
-        val output = process.inputStream.bufferedReader().readText().trim()
-        if (process.waitFor() != 0) {
+        if (rootResult.exitCode != 0) {
+            val output = rootResult.output
             logEvent("LED enabled=$enabled failed: ${output.ifBlank { "root write failed" }}")
             return@withContext ApplyResult(false, output.ifBlank { "LED state write failed" })
         }
-        val sent = sendRgbMessage("com_set_rgb_is_open:$value")
+        val sent = if (enabled) sendRgbMessage("com_set_rgb_is_open:true") else true
         logEvent("LED enabled=$enabled ipc=$sent")
         ApplyResult(sent, if (sent) "LEDs ${if (enabled) "on" else "off"}" else "Saved LED state; IPC unavailable")
+    }
+
+    private fun buildKr02ShutdownCommand(): String? {
+        val uartPath = deviceProfile.uartPath ?: return null
+        val packet = intArrayOf(
+            0xF7, 0x01,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0xED,
+        )
+        val escaped = packet.joinToString(separator = "") { "\\%03o".format(it) }
+        return "printf '$escaped' > '$uartPath'"
     }
 
     suspend fun collectDiagnostics(): String = withContext(Dispatchers.IO) {
@@ -426,12 +487,8 @@ class RgbController(private val context: Context) {
             ls -lZ $CONFIG_DIR/aya_rgb*.conf 2>&1
         """.trimIndent()
         val rootProbe = runCatching {
-            val process = ProcessBuilder("su", "-c", rootCommand)
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().readText().trim()
-            val exitCode = process.waitFor()
-            "exit=$exitCode\n${output.ifBlank { "(no output)" }}"
+            val result = runAsRoot(rootCommand)
+            "exit=${result.exitCode}\n${result.output.ifBlank { "(no output)" }}"
         }.getOrElse { "unavailable: ${it.javaClass.simpleName}: ${it.message}" }
 
         """
@@ -505,16 +562,15 @@ class RgbController(private val context: Context) {
                 "cp '${reportFile.absolutePath}' '$reportTarget' && " +
                 "chown media_rw:media_rw '$exportDir' '$reportTarget' && " +
                 "chmod 775 '$exportDir' && chmod 664 '$reportTarget'"
-        val process = runCatching {
-            ProcessBuilder("su", "-c", command).redirectErrorStream(true).start()
+        val rootResult = runCatching {
+            runAsRoot(command)
         }.getOrElse {
             return@withContext ApplyResult(false, "Could not start root export: ${it.message}")
         }
-        val output = process.inputStream.bufferedReader().readText().trim()
-        if (process.waitFor() != 0) {
+        if (rootResult.exitCode != 0) {
             return@withContext ApplyResult(
                 false,
-                output.ifBlank { "Diagnostics export failed" },
+                rootResult.output.ifBlank { "Diagnostics export failed" },
             )
         }
         logEvent("Exported diagnostics report to /storage/emulated/0/AYARGB")

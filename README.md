@@ -1,7 +1,7 @@
 # AYANEO RGB Control
 
 An experimental Android controller for the analogue-stick RGB lighting on the
-AYANEO Pocket S2 / S2 Pro and Pocket EVO.
+AYANEO Pocket S2 / S2 Pro, Pocket EVO, and Pocket FIT Elite.
 
 The app provides:
 
@@ -77,7 +77,7 @@ workaround when red is present:
 
 - red is left unchanged;
 - green is reduced to 20% of the requested value;
-- blue is reduced to 35% of the requested value;
+- blue is reduced to 20% of the requested value;
 - pure green and pure blue are left unchanged.
 
 This correction is deliberately simple, not a calibrated colour-management
@@ -88,7 +88,7 @@ to send the uncorrected RGB values.
 
 ## Requirements
 
-- AYANEO Pocket S2 / S2 Pro or Pocket EVO
+- AYANEO Pocket S2 / S2 Pro, Pocket EVO, or Pocket FIT Elite
 - rooted Android installation with Magisk
 - AYANEO GameWindow installed for animated modes
 - Android SDK and JDK 21 to build

@@ -138,7 +138,7 @@ private fun AyaneoRgbApp(controller: RgbController) {
             mixedBluePercent.toInt(),
         )
         calibrationTargetKey = key
-        calibrationTargetName = "Custom ${index + 1}"
+        calibrationTargetName = "Custom colour ${index + 1}"
         calibrationOverrideEnabled = true
         status = "Saved #${"%02X%02X%02X".format(rgb[0], rgb[1], rgb[2])} to Custom ${index + 1}"
     }
@@ -401,7 +401,7 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                                 else selectArgb(
                                                     customColor,
                                                     "custom_$index",
-                                                    "Custom ${index + 1}",
+                                                    "Custom colour ${index + 1}",
                                                 )
                                             },
                                             onLongPress = { saveCustomColor(index) },
@@ -521,7 +521,14 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                 },
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text("Custom strengths for ${calibrationTargetName ?: "this colour"}")
+                            Text(
+                                "Custom strengths for " +
+                                    if (targetKey.startsWith("preset_")) {
+                                        "Preset: ${calibrationTargetName ?: "this colour"}"
+                                    } else {
+                                        calibrationTargetName ?: "this colour"
+                                    },
+                            )
                         }
                     }
                     Text("Mixed green strength: ${mixedGreenPercent.toInt()}%")
