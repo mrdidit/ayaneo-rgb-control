@@ -8,17 +8,15 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Parcel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.io.File
 import java.io.FileOutputStream
-import java.io.BufferedReader
-import java.io.BufferedWriter
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.TimeUnit
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.math.roundToInt
@@ -63,6 +61,34 @@ class RgbController(private val context: Context) {
         private const val AIDL_DESCRIPTOR =
             "com.ayaneo.gamewindow.AyaAidlInterface"
         private const val CONFIG_DIR = "/data/media/0/.aya"
+        private const val POCKET_EVO_VALIDATED_FIRMWARE_MARKER = "23"
+        private const val POCKET_EVO_VALIDATED_GAMEWINDOW_VERSION = "1.5.66"
+        private const val POCKET_EVO_VALIDATED_GAMEWINDOW_CODE = 186L
+        private const val POCKET_EVO_VALIDATED_INPUT_PATH = "/dev/input/event6"
+        private const val POCKET_EVO_MAGISK_MODULE_DIR =
+            "/data/adb/modules/ayaneo_rgb_uart"
+        private const val POCKET_EVO_UART_SELINUX_CONTEXT =
+            "u:object_r:ayaneo_rgb_device:s0"
+        private const val POCKET_EVO_CONTROL_STATE_KEY = "pocket_evo_control_state"
+        private const val POCKET_EVO_STATE_STOCK = "stock"
+        private const val POCKET_EVO_STATE_STOPPING = "stopping"
+        private const val POCKET_EVO_STATE_DIRECT = "direct"
+        private const val POCKET_EVO_STATE_RESTORING = "restoring"
+
+        // A single lock is shared by every controller instance. This matters during
+        // Activity recreation: an old non-cancellable transaction must finish before
+        // a newly-created UI can issue another ownership-changing operation.
+        private val CONTROLLER_TRANSACTION_MUTEX = Mutex()
+
+        @Volatile
+        private var sharedInstance: RgbController? = null
+
+        fun shared(context: Context): RgbController =
+            sharedInstance ?: synchronized(this) {
+                sharedInstance ?: RgbController(context.applicationContext).also {
+                    sharedInstance = it
+                }
+            }
 
         private val DEVICE_PROFILES = listOf(
             DeviceProfile(
@@ -104,15 +130,25 @@ class RgbController(private val context: Context) {
         supportsReactive = false,
     )
 
+    val supportsPocketEvoAdvancedRgb: Boolean
+        get() = Build.DEVICE == "PocketEVO" && deviceProfile.name == "Pocket EVO"
+
     @Volatile
     private var binder: IBinder? = null
-    private var rootProcess: Process? = null
-    private var rootInput: BufferedWriter? = null
-    private var rootOutput: BufferedReader? = null
-    private val rootCommandId = AtomicLong()
+    @Volatile
+    private var serviceBindingRequested = false
     private val eventLog = ArrayDeque<String>()
     private val preferences =
         context.getSharedPreferences("rgb_settings", Context.MODE_PRIVATE)
+
+    val isPocketEvoDirectControlActive: Boolean
+        get() = pocketEvoControlState() == POCKET_EVO_STATE_DIRECT
+
+    val hasInterruptedPocketEvoTransaction: Boolean
+        get() = pocketEvoControlState() in setOf(
+            POCKET_EVO_STATE_STOPPING,
+            POCKET_EVO_STATE_RESTORING,
+        )
 
     init {
         logEvent(
@@ -121,6 +157,21 @@ class RgbController(private val context: Context) {
                 "directUart=${deviceProfile.supportsDirectUart})",
         )
     }
+
+    private fun pocketEvoControlState(): String =
+        preferences.getString(POCKET_EVO_CONTROL_STATE_KEY, POCKET_EVO_STATE_STOCK)
+            ?: POCKET_EVO_STATE_STOCK
+
+    private fun setPocketEvoControlState(state: String) {
+        // Ownership is safety-critical across process death, so commit it before
+        // proceeding instead of using the asynchronous SharedPreferences apply().
+        check(preferences.edit().putString(POCKET_EVO_CONTROL_STATE_KEY, state).commit()) {
+            "Could not persist Pocket EVO RGB ownership state"
+        }
+    }
+
+    fun shouldBindGameWindow(): Boolean =
+        !supportsPocketEvoAdvancedRgb || pocketEvoControlState() == POCKET_EVO_STATE_STOCK
 
     private fun logEvent(message: String) {
         synchronized(eventLog) {
@@ -156,8 +207,15 @@ class RgbController(private val context: Context) {
     }
 
     fun saveMode(mode: Int) {
-        preferences.edit().putInt("mode", mode).apply()
+        preferences.edit().apply {
+            putInt("mode", mode)
+            if (mode !in setOf(8, 9)) putInt("last_stock_mode", mode)
+        }.apply()
     }
+
+    fun loadLastStockMode(): Int =
+        preferences.getInt("last_stock_mode", 6).takeIf { it in setOf(1, 2, 3, 6, 7) }
+            ?: 6
 
     fun saveGlobalCalibration(greenPercent: Int, bluePercent: Int) {
         preferences.edit()
@@ -219,6 +277,58 @@ class RgbController(private val context: Context) {
         }
     }
 
+    fun loadPocketEvoStickColors(): List<Int> {
+        val fallback =
+            (preferences.getInt("red", 255).coerceIn(0, 255) shl 16) or
+                (preferences.getInt("green", 255).coerceIn(0, 255) shl 8) or
+                preferences.getInt("blue", 43).coerceIn(0, 255)
+        return List(2) { index ->
+            preferences.getInt("pocket_evo_stick_color_$index", fallback) and 0xFFFFFF
+        }
+    }
+
+    fun loadPocketEvoStickBrightness(): List<Int> {
+        val fallback = preferences.getInt("brightness", 100).coerceIn(1, 100)
+        return List(2) { index ->
+            preferences.getInt("pocket_evo_stick_brightness_$index", fallback)
+                .coerceIn(1, 100)
+        }
+    }
+
+    fun savePocketEvoStick(index: Int, color: Int, brightness: Int) {
+        if (index !in 0..1) return
+        preferences.edit()
+            .putInt("pocket_evo_stick_color_$index", color and 0xFFFFFF)
+            .putInt("pocket_evo_stick_brightness_$index", brightness.coerceIn(1, 100))
+            .apply()
+    }
+
+    fun loadPocketEvoZoneColors(): List<Int> {
+        val fallback =
+            (preferences.getInt("red", 255).coerceIn(0, 255) shl 16) or
+                (preferences.getInt("green", 255).coerceIn(0, 255) shl 8) or
+                preferences.getInt("blue", 43).coerceIn(0, 255)
+        return List(8) { index ->
+            preferences.getInt("pocket_evo_zone_color_$index", fallback) and 0xFFFFFF
+        }
+    }
+
+    fun loadPocketEvoZoneBrightness(): List<Int> {
+        val fallback = preferences.getInt("brightness", 100).coerceIn(1, 100)
+        return List(8) { index ->
+            preferences.getInt("pocket_evo_zone_brightness_$index", fallback)
+                .coerceIn(1, 100)
+        }
+    }
+
+    fun savePocketEvoZone(index: Int, color: Int, brightness: Int) {
+        if (index !in 0..7) return
+        preferences.edit()
+            .putInt("pocket_evo_zone_color_$index", color and 0xFFFFFF)
+            .putInt("pocket_evo_zone_brightness_$index", brightness.coerceIn(1, 100))
+            .apply()
+    }
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             binder = service
@@ -227,57 +337,98 @@ class RgbController(private val context: Context) {
         override fun onServiceDisconnected(name: ComponentName?) {
             binder = null
         }
+
+        override fun onBindingDied(name: ComponentName?) {
+            detachGameWindowBinding()
+        }
+
+        override fun onNullBinding(name: ComponentName?) {
+            detachGameWindowBinding()
+        }
     }
 
     fun bind(): Boolean {
+        if (!shouldBindGameWindow()) return false
+        return bindGameWindowService(createIfNeeded = true)
+    }
+
+    @Synchronized
+    private fun bindGameWindowService(createIfNeeded: Boolean = false): Boolean {
+        if (serviceBindingRequested) return true
         val intent = Intent().setClassName(GAMEWINDOW_PACKAGE, GAMEWINDOW_SERVICE)
-        return runCatching {
-            context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        val bound = runCatching {
+            // The public entry point gates direct ownership. Recovery explicitly
+            // starts GameWindow first and binds with flags=0 to avoid a second owner.
+            context.bindService(
+                intent,
+                connection,
+                if (createIfNeeded) Context.BIND_AUTO_CREATE else 0,
+            )
         }.getOrDefault(false)
+        serviceBindingRequested = bound
+        return bound
     }
 
     fun unbind() {
-        runCatching { context.unbindService(connection) }
-        binder = null
-        closeRootShell()
+        detachGameWindowBinding()
     }
 
     @Synchronized
-    private fun closeRootShell() {
-        runCatching { rootInput?.apply { write("exit\n"); flush() } }
-        runCatching { rootProcess?.destroy() }
-        rootInput = null
-        rootOutput = null
-        rootProcess = null
+    private fun detachGameWindowBinding() {
+        if (serviceBindingRequested) runCatching { context.unbindService(connection) }
+        serviceBindingRequested = false
+        binder = null
     }
+
+    private suspend fun <T> serializedControllerOperation(block: () -> T): T =
+        withContext(Dispatchers.IO) {
+            CONTROLLER_TRANSACTION_MUTEX.lock()
+            try {
+                // Once ownership begins changing, Activity destruction/cancellation
+                // must not strand the controller with GameWindow force-stopped.
+                withContext(NonCancellable) { block() }
+            } finally {
+                CONTROLLER_TRANSACTION_MUTEX.unlock()
+            }
+        }
 
     @Synchronized
     private fun runAsRoot(command: String): RootResult {
-        if (rootProcess?.isAlive != true) {
-            closeRootShell()
-            val process = ProcessBuilder("su").redirectErrorStream(true).start()
-            rootProcess = process
-            rootInput = BufferedWriter(OutputStreamWriter(process.outputStream))
-            rootOutput = BufferedReader(InputStreamReader(process.inputStream))
+        val process = ProcessBuilder("su", "-c", command)
+            .redirectErrorStream(true)
+            .start()
+        val output = StringBuilder()
+        var readFailure: Throwable? = null
+        val drainThread = Thread({
+            runCatching {
+                process.inputStream.reader().use { reader ->
+                    val buffer = CharArray(4_096)
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count < 0) break
+                        output.append(buffer, 0, count)
+                    }
+                }
+            }.onFailure { readFailure = it }
+        }, "ayargb-root-output").apply {
+            isDaemon = true
+            start()
         }
-        val input = rootInput ?: error("Root shell input is unavailable")
-        val output = rootOutput ?: error("Root shell output is unavailable")
-        val marker = "__AYARGB_ROOT_${rootCommandId.incrementAndGet()}__"
-        input.write(command)
-        input.write("\naya_rgb_rc=\$?\nprintf '\\n$marker:%s\\n' \"\$aya_rgb_rc\"\n")
-        input.flush()
-
-        val lines = mutableListOf<String>()
-        while (true) {
-            val line = output.readLine() ?: error("Root shell closed unexpectedly")
-            if (line.startsWith("$marker:")) {
-                return RootResult(
-                    exitCode = line.substringAfter(':').toIntOrNull() ?: 1,
-                    output = lines.joinToString("\n").trim(),
-                )
-            }
-            lines += line
+        if (!process.waitFor(60, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            process.waitFor(2, TimeUnit.SECONDS)
+            drainThread.join(2_000)
+            return RootResult(124, "Root command timed out")
         }
+        drainThread.join(2_000)
+        readFailure?.let { throw it }
+        if (drainThread.isAlive) {
+            return RootResult(125, "Root command output did not close")
+        }
+        return RootResult(
+            exitCode = process.exitValue(),
+            output = output.toString().trim(),
+        )
     }
 
     suspend fun apply(
@@ -293,7 +444,14 @@ class RgbController(private val context: Context) {
         reactiveHighlightColor: Int,
         persist: Boolean = true,
     ): ApplyResult =
-        withContext(Dispatchers.IO) {
+        serializedControllerOperation {
+            if (
+                supportsPocketEvoAdvancedRgb &&
+                pocketEvoControlState() != POCKET_EVO_STATE_STOCK
+            ) {
+                val restored = restorePocketEvoGameWindowLocked()
+                if (!restored.success) return@serializedControllerOperation restored
+            }
             if (persist) {
                 preferences.edit()
                     .putInt("red", red)
@@ -301,6 +459,7 @@ class RgbController(private val context: Context) {
                     .putInt("blue", blue)
                     .putInt("brightness", brightness)
                     .putInt("mode", mode)
+                    .putInt("last_stock_mode", mode)
                     .putBoolean("color_correction", colorCorrection)
                     .putInt("reactive_idle_color", reactiveIdleColor)
                     .putInt("reactive_highlight_color", reactiveHighlightColor)
@@ -358,7 +517,10 @@ class RgbController(private val context: Context) {
 
             val isKr02DirectMode =
                 deviceProfile.usesKr02Protocol && mode in setOf(1, 3, 6)
-            val directModeCommand = if (isKr02DirectMode || mode == 6) {
+            val directModeCommand = if (
+                isKr02DirectMode ||
+                (mode == 6 && !supportsPocketEvoAdvancedRgb)
+            ) {
                 buildDirectModeCommand(
                     mode = mode,
                     red = correctedRed.coerceIn(0, 255),
@@ -373,7 +535,7 @@ class RgbController(private val context: Context) {
                 sendRgbMessage("com_set_rgb_is_open:false")
                 // Its shutdown coroutine sleeps for 100 ms before serial cleanup.
                 Thread.sleep(350)
-                directModeCommand ?: return@withContext ApplyResult(
+                directModeCommand ?: return@serializedControllerOperation ApplyResult(
                     false,
                     "Pocket FIT Elite direct command is unavailable",
                 )
@@ -391,12 +553,18 @@ class RgbController(private val context: Context) {
                 configCommand
             }
             val rootResult = runCatching { runAsRoot(command) }.getOrElse {
-                return@withContext ApplyResult(false, "Could not start root shell: ${it.message}")
+                return@serializedControllerOperation ApplyResult(
+                    false,
+                    "Could not start root shell: ${it.message}",
+                )
             }
             if (rootResult.exitCode != 0) {
                 val output = rootResult.output
                 logEvent("Apply mode=$mode failed: ${output.ifBlank { "root write failed" }}")
-                return@withContext ApplyResult(false, output.ifBlank { "Root write failed" })
+                return@serializedControllerOperation ApplyResult(
+                    false,
+                    output.ifBlank { "Root write failed" },
+                )
             }
 
             val sent = if (isKr02DirectMode) {
@@ -413,6 +581,9 @@ class RgbController(private val context: Context) {
                     "uart=${if (mode == 6 && deviceProfile.supportsDirectUart) deviceProfile.uartPath else "none"} " +
                     "ipc=$sent",
             )
+            if (sent && persist) {
+                preferences.edit().putBoolean("led_enabled", true).apply()
+            }
             ApplyResult(
                 sent,
                 if (sent && mode == 6 && !deviceProfile.supportsDirectUart) {
@@ -421,6 +592,566 @@ class RgbController(private val context: Context) {
                 else "Saved values, but GameWindow IPC is not connected",
             )
         }
+
+    suspend fun applyPocketEvoPerStick(
+        colors: List<Int>,
+        brightness: List<Int>,
+        colorCorrection: Boolean,
+        mixedGreenPercent: Int,
+        mixedBluePercent: Int,
+    ): ApplyResult = serializedControllerOperation {
+        if (!supportsPocketEvoAdvancedRgb) {
+            return@serializedControllerOperation ApplyResult(
+                false,
+                "Per-stick RGB is Pocket EVO only",
+            )
+        }
+        if (colors.size != 2 || brightness.size != 2) {
+            return@serializedControllerOperation ApplyResult(
+                false,
+                "Per-stick RGB requires two colours and brightness values",
+            )
+        }
+        preferences.edit().apply {
+            colors.indices.forEach { index ->
+                putInt("pocket_evo_stick_color_$index", colors[index] and 0xFFFFFF)
+                putInt(
+                    "pocket_evo_stick_brightness_$index",
+                    brightness[index].coerceIn(1, 100),
+                )
+            }
+            putBoolean("color_correction", colorCorrection)
+            putInt("mixed_green_percent", mixedGreenPercent.coerceIn(0, 100))
+            putInt("mixed_blue_percent", mixedBluePercent.coerceIn(0, 100))
+        }.apply()
+
+        val corrected = colors.map { color ->
+            correctedPackedColor(
+                color,
+                colorCorrection,
+                mixedGreenPercent,
+                mixedBluePercent,
+            )
+        }
+        val levels = brightness.map(::pocketEvoBrightnessLevel)
+        val left = corrected[0]
+        val right = corrected[1]
+
+        executePocketEvoDirectTransaction transaction@ {
+            // A broadcast Static frame reliably leaves segmented mode. The targeted
+            // frames that follow retain separate left and right driver state.
+            val frames = listOf(
+                PocketEvoRgbProtocol.buildStaticFrame(
+                    red = left shr 16 and 0xFF,
+                    green = left shr 8 and 0xFF,
+                    blue = left and 0xFF,
+                    brightness = levels[0],
+                    ring = PocketEvoRgbProtocol.Ring.BROADCAST,
+                ),
+                PocketEvoRgbProtocol.buildStaticFrame(
+                    red = left shr 16 and 0xFF,
+                    green = left shr 8 and 0xFF,
+                    blue = left and 0xFF,
+                    brightness = levels[0],
+                    ring = PocketEvoRgbProtocol.Ring.LEFT,
+                ),
+                PocketEvoRgbProtocol.buildStaticFrame(
+                    red = right shr 16 and 0xFF,
+                    green = right shr 8 and 0xFF,
+                    blue = right and 0xFF,
+                    brightness = levels[1],
+                    ring = PocketEvoRgbProtocol.Ring.RIGHT,
+                ),
+            )
+            frames.forEach { frame ->
+                writePocketEvoFrameRepeated(frame)?.let { return@transaction it }
+            }
+            if (!preferences.edit().putBoolean("led_enabled", true).commit()) {
+                return@transaction ApplyResult(false, "Could not save enabled LED state")
+            }
+            logEvent("Applied Pocket EVO independent per-stick Static RGB")
+            ApplyResult(true, "Applied independent left/right colours · GameWindow paused")
+        }
+    }
+
+    suspend fun applyPocketEvoQuadrants(
+        colors: List<Int>,
+        brightness: List<Int>,
+        colorCorrection: Boolean,
+        mixedGreenPercent: Int,
+        mixedBluePercent: Int,
+    ): ApplyResult = serializedControllerOperation {
+        if (!supportsPocketEvoAdvancedRgb) {
+            return@serializedControllerOperation ApplyResult(
+                false,
+                "Per-quadrant RGB is Pocket EVO only",
+            )
+        }
+        if (colors.size != 8 || brightness.size != 8) {
+            return@serializedControllerOperation ApplyResult(
+                false,
+                "Per-quadrant RGB requires eight colours and brightness values",
+            )
+        }
+        preferences.edit().apply {
+            colors.indices.forEach { index ->
+                putInt("pocket_evo_zone_color_$index", colors[index] and 0xFFFFFF)
+                putInt(
+                    "pocket_evo_zone_brightness_$index",
+                    brightness[index].coerceIn(1, 100),
+                )
+            }
+            putBoolean("color_correction", colorCorrection)
+            putInt("mixed_green_percent", mixedGreenPercent.coerceIn(0, 100))
+            putInt("mixed_blue_percent", mixedBluePercent.coerceIn(0, 100))
+        }.apply()
+
+        val corrected = colors.map { color ->
+            correctedPackedColor(
+                color,
+                colorCorrection,
+                mixedGreenPercent,
+                mixedBluePercent,
+            )
+        }
+        val levels = brightness.map(::pocketEvoBrightnessLevel)
+
+        executePocketEvoDirectTransaction transaction@ {
+            // Controller-follow initialises all eight retained banks. Supplying the
+            // same colour in both slots keeps the visual state deterministic while
+            // the MCU performs its own proven per-zone setup sequence.
+            val initialColor = corrected.first()
+            val initializer = PocketEvoRgbProtocol.buildSameColourReactiveInitializerFrame(
+                red = initialColor shr 16 and 0xFF,
+                green = initialColor shr 8 and 0xFF,
+                blue = initialColor and 0xFF,
+                brightness = levels.first(),
+            )
+            writePocketEvoFrameRepeated(initializer, delayMillis = 1_000)?.let {
+                return@transaction it
+            }
+            Thread.sleep(1_500)
+
+            val rings = listOf(
+                PocketEvoRgbProtocol.Ring.LEFT,
+                PocketEvoRgbProtocol.Ring.RIGHT,
+            )
+            rings.forEachIndexed { ringIndex, ring ->
+                PocketEvoRgbProtocol.Zone.entries.forEach { zone ->
+                    val index = ringIndex * 4 + zone.index
+                    val color = corrected[index]
+                    val frame = PocketEvoRgbProtocol.buildPerZoneFrame(
+                        ring = ring,
+                        zone = zone,
+                        red = color shr 16 and 0xFF,
+                        green = color shr 8 and 0xFF,
+                        blue = color and 0xFF,
+                        brightness = levels[index],
+                    )
+                    writePocketEvoFrameRepeated(frame)?.let { return@transaction it }
+                }
+            }
+            if (!preferences.edit().putBoolean("led_enabled", true).commit()) {
+                return@transaction ApplyResult(false, "Could not save enabled LED state")
+            }
+            logEvent("Applied Pocket EVO eight-zone RGB and brightness")
+            ApplyResult(true, "Applied eight quadrant colours · GameWindow paused")
+        }
+    }
+
+    suspend fun restorePocketEvoGameWindow(): ApplyResult =
+        serializedControllerOperation { restorePocketEvoGameWindowLocked() }
+
+    suspend fun recoverInterruptedPocketEvoTransaction(): ApplyResult? =
+        serializedControllerOperation {
+            if (!hasInterruptedPocketEvoTransaction) {
+                null
+            } else {
+                restorePocketEvoGameWindowLocked()
+            }
+        }
+
+    private fun correctedPackedColor(
+        color: Int,
+        colorCorrection: Boolean,
+        mixedGreenPercent: Int,
+        mixedBluePercent: Int,
+    ): Int {
+        val channels = correctedRgb(
+            red = color shr 16 and 0xFF,
+            green = color shr 8 and 0xFF,
+            blue = color and 0xFF,
+            colorCorrection = colorCorrection,
+            mixedGreenPercent = mixedGreenPercent,
+            mixedBluePercent = mixedBluePercent,
+        )
+        return (channels[0] shl 16) or (channels[1] shl 8) or channels[2]
+    }
+
+    private fun pocketEvoBrightnessLevel(percent: Int): Int =
+        (percent.coerceIn(1, 100) * 255 / 100).coerceIn(1, 255)
+
+    private fun executePocketEvoDirectTransaction(
+        action: () -> ApplyResult,
+    ): ApplyResult {
+        validatePocketEvoDirectEnvironment()?.let { return it }
+        val stateStarted = runCatching {
+            setPocketEvoControlState(POCKET_EVO_STATE_STOPPING)
+        }.exceptionOrNull()
+        if (stateStarted != null) {
+            return ApplyResult(
+                false,
+                "Could not persist RGB ownership; GameWindow was not stopped",
+            )
+        }
+
+        val preflightOrStopFailure = stopGameWindowForPocketEvo()
+        if (preflightOrStopFailure != null) {
+            return recoverPocketEvoFailure(preflightOrStopFailure)
+        }
+        val result = runCatching(action).getOrElse {
+            ApplyResult(false, "Pocket EVO RGB transaction failed: ${it.message}")
+        }
+        if (!result.success) return recoverPocketEvoFailure(result)
+
+        return runCatching {
+            setPocketEvoControlState(POCKET_EVO_STATE_DIRECT)
+            result
+        }.getOrElse {
+            recoverPocketEvoFailure(
+                ApplyResult(false, "Could not retain direct RGB ownership: ${it.message}"),
+            )
+        }
+    }
+
+    private fun validatePocketEvoDirectEnvironment(): ApplyResult? {
+        val packageInfo = runCatching {
+            context.packageManager.getPackageInfo(GAMEWINDOW_PACKAGE, 0)
+        }.getOrElse {
+            return ApplyResult(false, "Could not verify GameWindow: ${it.message}")
+        }
+        if (
+            packageInfo.versionName != POCKET_EVO_VALIDATED_GAMEWINDOW_VERSION ||
+            packageInfo.longVersionCode != POCKET_EVO_VALIDATED_GAMEWINDOW_CODE
+        ) {
+            return ApplyResult(
+                false,
+                "Direct RGB is validated with GameWindow " +
+                    "$POCKET_EVO_VALIDATED_GAMEWINDOW_VERSION " +
+                    "($POCKET_EVO_VALIDATED_GAMEWINDOW_CODE) only",
+            )
+        }
+        val version = runCatching {
+            runAsRoot("cat '$CONFIG_DIR/aya_firmware_local_version.conf' 2>/dev/null")
+        }.getOrElse {
+            return ApplyResult(false, "Could not read Pocket EVO controller marker: ${it.message}")
+        }
+        if (version.exitCode != 0 ||
+            version.output.trim() != POCKET_EVO_VALIDATED_FIRMWARE_MARKER
+        ) {
+            return ApplyResult(
+                false,
+                "Direct RGB requires the physically validated Pocket EVO controller marker " +
+                POCKET_EVO_VALIDATED_FIRMWARE_MARKER,
+            )
+        }
+        val uartPath = deviceProfile.uartPath
+            ?: return ApplyResult(false, "Pocket EVO UART is unavailable")
+        val module = runCatching {
+            runAsRoot(
+                "test -d '$POCKET_EVO_MAGISK_MODULE_DIR' && " +
+                    "test ! -e '$POCKET_EVO_MAGISK_MODULE_DIR/disable' && " +
+                    "test ! -e '$POCKET_EVO_MAGISK_MODULE_DIR/remove' && " +
+                    "test -c '$uartPath' && ls -lZ '$uartPath'",
+            )
+        }.getOrElse {
+            return ApplyResult(false, "Could not verify the AYANEO RGB UART module: ${it.message}")
+        }
+        if (
+            module.exitCode != 0 ||
+            POCKET_EVO_UART_SELINUX_CONTEXT !in module.output
+        ) {
+            return ApplyResult(
+                false,
+                "Direct RGB requires the active AYANEO RGB UART Magisk module; " +
+                    "install or enable it, then reboot",
+            )
+        }
+        return null
+    }
+
+    private fun stopGameWindowForPocketEvo(): ApplyResult? {
+        // The IPC request is cooperative only; force-stop below is authoritative.
+        sendRgbMessage("com_set_rgb_is_open:false")
+        Thread.sleep(350)
+        detachGameWindowBinding()
+        val stop = runCatching { runAsRoot("am force-stop $GAMEWINDOW_PACKAGE") }.getOrElse {
+            return ApplyResult(false, "Could not stop GameWindow: ${it.message}")
+        }
+        if (stop.exitCode != 0) {
+            return ApplyResult(false, stop.output.ifBlank { "Could not stop GameWindow" })
+        }
+        var lastPid = "unknown"
+        var lastHolders = "unknown"
+        var consecutiveClearChecks = 0
+        repeat(20) {
+            val owner = runCatching { runAsRoot("pidof $GAMEWINDOW_PACKAGE") }.getOrElse {
+                return ApplyResult(false, "Could not verify GameWindow stopped: ${it.message}")
+            }
+            val holders = runCatching { scanPocketEvoUartOwners() }.getOrElse {
+                return ApplyResult(false, "Could not inspect RGB UART owners: ${it.message}")
+            }
+            if (
+                owner.exitCode != 0 &&
+                !(owner.exitCode == 1 && owner.output.isBlank())
+            ) {
+                return ApplyResult(
+                    false,
+                    owner.output.ifBlank { "Could not verify GameWindow stopped" },
+                )
+            }
+            if (holders.exitCode != 0) {
+                return ApplyResult(
+                    false,
+                    holders.output.ifBlank { "RGB UART ownership scan failed closed" },
+                )
+            }
+            lastPid = owner.output.trim()
+            lastHolders = holders.output.trim()
+            if (lastPid.isBlank() && lastHolders.isBlank()) {
+                consecutiveClearChecks += 1
+                if (consecutiveClearChecks >= 2) return null
+            } else {
+                consecutiveClearChecks = 0
+            }
+            Thread.sleep(100)
+        }
+        return ApplyResult(
+            false,
+            "Could not acquire RGB UART safely (GameWindow PID=${lastPid.ifBlank { "none" }}, " +
+                "holders=${lastHolders.ifBlank { "none" }})",
+        )
+    }
+
+    private fun scanPocketEvoUartOwners(): RootResult {
+        val uartPath = deviceProfile.uartPath ?: return RootResult(1, "UART unavailable")
+        val command =
+            "if [ ! -c '$uartPath' ]; then\n" +
+                "  printf '%s\\n' 'RGB UART unavailable'\n" +
+                "  exit 2\n" +
+                "fi\n" +
+                "if [ ! -x /system/bin/toybox ]; then\n" +
+                "  printf '%s\\n' 'Android toybox unavailable'\n" +
+                "  exit 126\n" +
+                "fi\n" +
+                "exec /system/bin/toybox timeout -s KILL 4s " +
+                "/system/bin/toybox lsof -t '$uartPath'"
+        val result = runAsRoot(command)
+        if (result.exitCode != 0) return result
+        val owners = result.output.lineSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toList()
+        if (owners.any { owner -> owner.any { char -> !char.isDigit() } }) {
+            return RootResult(2, "Unexpected RGB UART owner output: ${result.output}")
+        }
+        return result.copy(output = owners.joinToString(" "))
+    }
+
+    private fun writePocketEvoFrameRepeated(
+        frame: ByteArray,
+        repeats: Int = 3,
+        delayMillis: Long = 350,
+    ): ApplyResult? {
+        val uartPath = deviceProfile.uartPath
+            ?: return ApplyResult(false, "Pocket EVO UART is unavailable")
+        val escaped = PocketEvoRgbProtocol.toOctalShellEscape(frame)
+        repeat(repeats) { index ->
+            val result = runCatching {
+                runAsRoot("printf '$escaped' > '$uartPath'")
+            }.getOrElse {
+                return ApplyResult(false, "Pocket EVO UART write failed: ${it.message}")
+            }
+            if (result.exitCode != 0) {
+                return ApplyResult(
+                    false,
+                    result.output.ifBlank { "Pocket EVO UART write failed" },
+                )
+            }
+            Thread.sleep(delayMillis)
+        }
+        return null
+    }
+
+    private fun recoverPocketEvoFailure(failure: ApplyResult): ApplyResult {
+        val recovery = runCatching { restorePocketEvoGameWindowLocked() }.getOrElse {
+            ApplyResult(false, "Verified GameWindow recovery failed: ${it.message}")
+        }
+        logEvent("Pocket EVO direct transaction failed; recovery=${recovery.success}")
+        return failure.copy(
+            message = failure.message + if (recovery.success) {
+                " · GameWindow PID/UART recovery verified"
+            } else {
+                " · ${recovery.message}; recovery marker retained"
+            },
+        )
+    }
+
+    private fun restorePocketEvoGameWindowLocked(): ApplyResult {
+        if (!supportsPocketEvoAdvancedRgb) {
+            return ApplyResult(false, "GameWindow handoff is Pocket EVO only")
+        }
+        runCatching { setPocketEvoControlState(POCKET_EVO_STATE_RESTORING) }.getOrElse {
+            return ApplyResult(false, "Could not persist GameWindow recovery state: ${it.message}")
+        }
+        detachGameWindowBinding()
+
+        val ledEnabled = preferences.getBoolean("led_enabled", true)
+        val config = runCatching {
+            runAsRoot(
+                "mkdir -p '$CONFIG_DIR' && " +
+                    "printf '%s' '${ledEnabled}' > '$CONFIG_DIR/aya_rgb_is_open.conf' && " +
+                    "chown system:system '$CONFIG_DIR/aya_rgb_is_open.conf' && " +
+                    "chmod 0660 '$CONFIG_DIR/aya_rgb_is_open.conf'",
+            )
+        }.getOrNull()
+        if (config?.exitCode != 0) {
+            logEvent("Could not synchronise stock LED preference before GameWindow restart")
+        }
+
+        val started = runCatching {
+            runAsRoot(
+                "am startservice -n " +
+                    "$GAMEWINDOW_PACKAGE/$GAMEWINDOW_PACKAGE.utils.aidl.AyaAidlService",
+            )
+        }.getOrElse {
+            return ApplyResult(false, "Could not restart GameWindow: ${it.message}")
+        }
+        if (started.exitCode != 0) {
+            return ApplyResult(
+                false,
+                started.output.ifBlank { "GameWindow restart failed; recovery marker retained" },
+            )
+        }
+
+        val uartPath = deviceProfile.uartPath
+            ?: return ApplyResult(false, "Pocket EVO UART is unavailable")
+        val inputProbe = runCatching {
+            runAsRoot("test -c '$POCKET_EVO_VALIDATED_INPUT_PATH'")
+        }.getOrNull()
+        if (inputProbe?.exitCode != 0) {
+            return ApplyResult(
+                false,
+                "Validated controller input $POCKET_EVO_VALIDATED_INPUT_PATH is unavailable; " +
+                    "recovery marker retained",
+            )
+        }
+        var verifiedPid: String? = null
+        for (attempt in 0 until 35) {
+            val pidResult = runCatching {
+                runAsRoot("pidof $GAMEWINDOW_PACKAGE")
+            }.getOrElse {
+                return ApplyResult(
+                    false,
+                    "Could not verify restarted GameWindow: ${it.message}; " +
+                        "recovery marker retained",
+                )
+            }
+            if (
+                pidResult.exitCode != 0 &&
+                !(pidResult.exitCode == 1 && pidResult.output.isBlank())
+            ) {
+                return ApplyResult(
+                    false,
+                    pidResult.output.ifBlank {
+                        "Could not verify restarted GameWindow; recovery marker retained"
+                    },
+                )
+            }
+            val pid = pidResult.output
+                .split(Regex("\\s+"))
+                .firstOrNull { token -> token.isNotEmpty() && token.all(Char::isDigit) }
+            if (pid != null) {
+                val descriptors = runCatching {
+                    runAsRoot("ls -l '/proc/$pid/fd' 2>/dev/null")
+                }.getOrElse {
+                    return ApplyResult(
+                        false,
+                        "Could not inspect restarted GameWindow: ${it.message}; " +
+                            "recovery marker retained",
+                    )
+                }
+                if (descriptors.exitCode == 0) {
+                    val targets = descriptors.output.lineSequence()
+                        .map { it.substringAfter(" -> ", "").trim() }
+                        .filter(String::isNotEmpty)
+                        .toList()
+                    val uartCount = targets.count { it == uartPath }
+                    if (uartCount == 1 || !ledEnabled) {
+                        verifiedPid = pid
+                        break
+                    }
+                } else if (descriptors.output.isNotBlank()) {
+                    return ApplyResult(
+                        false,
+                        descriptors.output + "; recovery marker retained",
+                    )
+                }
+            }
+            Thread.sleep(150)
+        }
+        if (verifiedPid == null) {
+            return ApplyResult(
+                false,
+                "GameWindow started but PID/UART/input ownership was not verified; " +
+                    "recovery marker retained",
+            )
+        }
+
+        // Force a fresh binder after the old service process was killed.
+        detachGameWindowBinding()
+        if (!bindGameWindowService()) {
+            return ApplyResult(false, "GameWindow process recovered but fresh IPC bind failed")
+        }
+        for (attempt in 0 until 30) {
+            if (liveBinder() != null) break
+            Thread.sleep(100)
+        }
+        val sent = sendRgbMessage("com_set_rgb_is_open:${ledEnabled}")
+        if (!sent) {
+            return ApplyResult(
+                false,
+                "GameWindow PID/UART recovered but stock IPC handoff failed; " +
+                "recovery marker retained",
+            )
+        }
+        val stockMode = loadLastStockMode()
+        if (!preferences.edit().putInt("mode", stockMode).commit()) {
+            return ApplyResult(
+                false,
+                "GameWindow recovered but the stock UI mode could not be restored; " +
+                    "recovery marker retained",
+            )
+        }
+        runCatching { setPocketEvoControlState(POCKET_EVO_STATE_STOCK) }.getOrElse {
+            return ApplyResult(
+                false,
+                "GameWindow recovered but ownership state could not be cleared: ${it.message}",
+            )
+        }
+        logEvent(
+            "Returned Pocket EVO RGB control to verified GameWindow PID=$verifiedPid " +
+                "ledEnabled=$ledEnabled",
+        )
+        return ApplyResult(
+            true,
+            if (ledEnabled) {
+                "Returned RGB control to AYANEO · PID/UART verified"
+            } else {
+                "Returned RGB control to AYANEO with LEDs off · process/input verified"
+            },
+        )
+    }
 
     private fun buildDirectModeCommand(
         mode: Int,
@@ -478,8 +1209,43 @@ class RgbController(private val context: Context) {
         return "printf '$escaped' > '$uartPath'"
     }
 
-    suspend fun setLedEnabled(enabled: Boolean): ApplyResult = withContext(Dispatchers.IO) {
-        preferences.edit().putBoolean("led_enabled", enabled).apply()
+    suspend fun setLedEnabled(enabled: Boolean): ApplyResult = serializedControllerOperation {
+        if (supportsPocketEvoAdvancedRgb && hasInterruptedPocketEvoTransaction) {
+            val restored = restorePocketEvoGameWindowLocked()
+            if (!restored.success) return@serializedControllerOperation restored
+        }
+        if (supportsPocketEvoAdvancedRgb && isPocketEvoDirectControlActive) {
+            if (enabled) {
+                if (!preferences.edit().putBoolean("led_enabled", true).commit()) {
+                    return@serializedControllerOperation ApplyResult(
+                        false,
+                        "Could not save LED state",
+                    )
+                }
+                return@serializedControllerOperation ApplyResult(
+                    true,
+                    "LEDs enabled; applying the selected Pocket EVO layout",
+                )
+            }
+            return@serializedControllerOperation executePocketEvoDirectTransaction transaction@ {
+                val offFrame = PocketEvoRgbProtocol.buildStaticFrame(
+                    red = 0,
+                    green = 0,
+                    blue = 0,
+                    brightness = 0,
+                    ring = PocketEvoRgbProtocol.Ring.BROADCAST,
+                )
+                writePocketEvoFrameRepeated(offFrame)?.let { return@transaction it }
+                if (!preferences.edit().putBoolean("led_enabled", false).commit()) {
+                    return@transaction ApplyResult(
+                        false,
+                        "LEDs were disabled but state could not be saved",
+                    )
+                }
+                logEvent("Pocket EVO direct RGB disabled with broadcast black Static frame")
+                ApplyResult(true, "LEDs off · GameWindow remains paused")
+            }
+        }
         val value = enabled.toString()
         if (!enabled) sendRgbMessage("com_set_rgb_is_open:false")
         var command =
@@ -494,14 +1260,21 @@ class RgbController(private val context: Context) {
         val rootResult = runCatching {
             runAsRoot(command)
         }.getOrElse {
-            return@withContext ApplyResult(false, "Could not start root shell: ${it.message}")
+            return@serializedControllerOperation ApplyResult(
+                false,
+                "Could not start root shell: ${it.message}",
+            )
         }
         if (rootResult.exitCode != 0) {
             val output = rootResult.output
             logEvent("LED enabled=$enabled failed: ${output.ifBlank { "root write failed" }}")
-            return@withContext ApplyResult(false, output.ifBlank { "LED state write failed" })
+            return@serializedControllerOperation ApplyResult(
+                false,
+                output.ifBlank { "LED state write failed" },
+            )
         }
         val sent = if (enabled) sendRgbMessage("com_set_rgb_is_open:true") else true
+        if (sent) preferences.edit().putBoolean("led_enabled", enabled).apply()
         logEvent("LED enabled=$enabled ipc=$sent")
         ApplyResult(sent, if (sent) "LEDs ${if (enabled) "on" else "off"}" else "Saved LED state; IPC unavailable")
     }
@@ -715,17 +1488,36 @@ class RgbController(private val context: Context) {
     private fun sendApplyMessage(): Boolean =
         sendRgbMessage("com_set_rgb_is_open:true")
 
+    private fun liveBinder(): IBinder? {
+        val candidate = binder ?: return null
+        return if (candidate.isBinderAlive && candidate.pingBinder()) {
+            candidate
+        } else {
+            invalidateGameWindowBinder(candidate)
+            null
+        }
+    }
+
+    @Synchronized
+    private fun invalidateGameWindowBinder(expected: IBinder) {
+        if (binder === expected) detachGameWindowBinding()
+    }
+
     private fun sendRgbMessage(message: String): Boolean {
-        val remote = binder ?: return false
+        val remote = liveBinder() ?: return false
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(AIDL_DESCRIPTOR)
             data.writeString("rgbpicker:msg_type_rgb:$message")
-            remote.transact(IBinder.FIRST_CALL_TRANSACTION, data, reply, 0)
+            if (!remote.transact(IBinder.FIRST_CALL_TRANSACTION, data, reply, 0)) {
+                invalidateGameWindowBinder(remote)
+                return false
+            }
             reply.readException()
             true
         } catch (_: Exception) {
+            invalidateGameWindowBinder(remote)
             false
         } finally {
             reply.recycle()

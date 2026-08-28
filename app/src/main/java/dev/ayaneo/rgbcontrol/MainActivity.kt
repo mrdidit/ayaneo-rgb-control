@@ -42,7 +42,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.PI
@@ -57,34 +57,90 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        controller = RgbController(this)
-        controller.bind()
+        // Process-retained controller prevents Activity recreation from creating a
+        // second binder/root owner while a non-cancellable UART transaction finishes.
+        controller = RgbController.shared(applicationContext)
+        if (controller.shouldBindGameWindow()) controller.bind()
         setContent { AyaneoRgbApp(controller) }
-    }
-
-    override fun onDestroy() {
-        controller.unbind()
-        super.onDestroy()
     }
 }
 
 private data class RgbPreset(val key: String, val name: String, val color: Color)
 
+private data class RgbApplySnapshot(
+    val mode: Int,
+    val red: Int,
+    val green: Int,
+    val blue: Int,
+    val brightness: Int,
+    val colorCorrection: Boolean,
+    val mixedGreenPercent: Int,
+    val mixedBluePercent: Int,
+    val reactiveIdleColor: Int,
+    val reactiveHighlightColor: Int,
+    val stickColors: List<Int>,
+    val stickBrightness: List<Int>,
+    val zoneColors: List<Int>,
+    val zoneBrightness: List<Int>,
+)
+
+private const val POCKET_EVO_PER_STICK_MODE = 8
+private const val POCKET_EVO_QUADRANT_MODE = 9
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun AyaneoRgbApp(controller: RgbController) {
     val deviceProfile = remember { controller.deviceProfile }
+    val isPocketEvo = remember { controller.supportsPocketEvoAdvancedRgb }
     val saved = remember { controller.loadSettings() }
-    val savedHsv = remember(saved) {
+    val pocketEvoStickColors = remember {
+        controller.loadPocketEvoStickColors().toMutableStateList()
+    }
+    val pocketEvoStickBrightness = remember {
+        controller.loadPocketEvoStickBrightness().toMutableStateList()
+    }
+    val pocketEvoZoneColors = remember {
+        controller.loadPocketEvoZoneColors().toMutableStateList()
+    }
+    val pocketEvoZoneBrightness = remember {
+        controller.loadPocketEvoZoneBrightness().toMutableStateList()
+    }
+    val initialMode = remember(saved, isPocketEvo) {
+        if (!isPocketEvo && saved.mode in setOf(
+                POCKET_EVO_PER_STICK_MODE,
+                POCKET_EVO_QUADRANT_MODE,
+            )
+        ) {
+            6
+        } else {
+            saved.mode
+        }
+    }
+    val initialColor = remember(initialMode, saved) {
+        when (initialMode) {
+            POCKET_EVO_PER_STICK_MODE -> pocketEvoStickColors[0]
+            POCKET_EVO_QUADRANT_MODE -> pocketEvoZoneColors[0]
+            else -> AndroidColor.rgb(saved.red, saved.green, saved.blue)
+        }
+    }
+    val savedHsv = remember(initialColor) {
         FloatArray(3).also {
-            AndroidColor.colorToHSV(AndroidColor.rgb(saved.red, saved.green, saved.blue), it)
+            AndroidColor.colorToHSV(initialColor, it)
         }
     }
     var hue by remember { mutableFloatStateOf(savedHsv[0]) }
     var saturation by remember { mutableFloatStateOf(savedHsv[1]) }
     var value by remember { mutableFloatStateOf(savedHsv[2]) }
-    var brightness by remember { mutableFloatStateOf(saved.brightness.toFloat()) }
-    var mode by remember { mutableIntStateOf(saved.mode) }
+    var brightness by remember {
+        mutableFloatStateOf(
+            when (initialMode) {
+                POCKET_EVO_PER_STICK_MODE -> pocketEvoStickBrightness[0].toFloat()
+                POCKET_EVO_QUADRANT_MODE -> pocketEvoZoneBrightness[0].toFloat()
+                else -> saved.brightness.toFloat()
+            },
+        )
+    }
+    var mode by remember { mutableIntStateOf(initialMode) }
     var livePreview by remember { mutableStateOf(saved.livePreview) }
     var colorCorrection by remember { mutableStateOf(saved.colorCorrection) }
     var globalGreenPercent by remember {
@@ -103,8 +159,24 @@ private fun AyaneoRgbApp(controller: RgbController) {
     var reactiveHighlightColor by remember { mutableIntStateOf(saved.reactiveHighlightColor) }
     var themeColor by remember { mutableIntStateOf(saved.themeColor) }
     var reactiveTarget by remember { mutableIntStateOf(0) }
-    var status by remember { mutableStateOf("Connected to AYANEO GameWindow") }
-    var pendingApply by remember { mutableStateOf<Job?>(null) }
+    var pocketEvoStickTarget by remember { mutableIntStateOf(0) }
+    var pocketEvoRingTarget by remember { mutableIntStateOf(0) }
+    var pocketEvoZoneTarget by remember { mutableIntStateOf(0) }
+    var status by remember {
+        mutableStateOf(
+            when {
+                controller.hasInterruptedPocketEvoTransaction ->
+                    "Interrupted RGB handoff detected; recovering GameWindow…"
+                controller.isPocketEvoDirectControlActive ->
+                    "Pocket EVO direct RGB control active · GameWindow paused"
+                else -> "Connected to AYANEO GameWindow"
+            },
+        )
+    }
+    var applyRunning by remember { mutableStateOf(false) }
+    // Opening/recreating the UI must never write hardware merely because live
+    // preview was saved as enabled. The first effect pass is observational.
+    var suppressNextLivePreview by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val rgb = remember(hue, saturation, value) { hsvToRgb(hue, saturation, value) }
@@ -138,6 +210,34 @@ private fun AyaneoRgbApp(controller: RgbController) {
         mixedBluePercent = calibration?.second?.toFloat() ?: globalBluePercent
     }
 
+    fun selectPocketEvoStick(index: Int) {
+        pocketEvoStickTarget = index.coerceIn(0, 1)
+        selectArgb(pocketEvoStickColors[pocketEvoStickTarget])
+        brightness = pocketEvoStickBrightness[pocketEvoStickTarget].toFloat()
+    }
+
+    fun selectPocketEvoZone(ringIndex: Int, zoneIndex: Int) {
+        pocketEvoRingTarget = ringIndex.coerceIn(0, 1)
+        pocketEvoZoneTarget = zoneIndex.coerceIn(0, 3)
+        val index = pocketEvoRingTarget * 4 + pocketEvoZoneTarget
+        selectArgb(pocketEvoZoneColors[index])
+        brightness = pocketEvoZoneBrightness[index].toFloat()
+    }
+
+    fun restoreStockUi() {
+        suppressNextLivePreview = true
+        mode = controller.loadLastStockMode()
+        brightness = saved.brightness.toFloat()
+        selectArgb(
+            if (mode == 7) {
+                if (reactiveTarget == 0) saved.reactiveIdleColor
+                else saved.reactiveHighlightColor
+            } else {
+                AndroidColor.rgb(saved.red, saved.green, saved.blue)
+            },
+        )
+    }
+
     fun saveCustomColor(index: Int) {
         val color = AndroidColor.rgb(rgb[0], rgb[1], rgb[2])
         customColors[index] = color
@@ -154,22 +254,105 @@ private fun AyaneoRgbApp(controller: RgbController) {
         status = "Saved #${"%02X%02X%02X".format(rgb[0], rgb[1], rgb[2])} to Custom ${index + 1}"
     }
 
-    fun applyNow() {
-        pendingApply?.cancel()
-        pendingApply = scope.launch {
-            val result = controller.apply(
-                mode,
-                rgb[0],
-                rgb[1],
-                rgb[2],
-                brightness.toInt(),
-                colorCorrection,
-                mixedGreenPercent.toInt(),
-                mixedBluePercent.toInt(),
-                reactiveIdleColor,
-                reactiveHighlightColor,
+    fun captureApplySnapshot(): RgbApplySnapshot = RgbApplySnapshot(
+        mode = mode,
+        red = rgb[0],
+        green = rgb[1],
+        blue = rgb[2],
+        brightness = brightness.toInt(),
+        colorCorrection = colorCorrection,
+        mixedGreenPercent = mixedGreenPercent.toInt(),
+        mixedBluePercent = mixedBluePercent.toInt(),
+        reactiveIdleColor = reactiveIdleColor,
+        reactiveHighlightColor = reactiveHighlightColor,
+        stickColors = pocketEvoStickColors.toList(),
+        stickBrightness = pocketEvoStickBrightness.toList(),
+        zoneColors = pocketEvoZoneColors.toList(),
+        zoneBrightness = pocketEvoZoneBrightness.toList(),
+    )
+
+    suspend fun applySnapshot(snapshot: RgbApplySnapshot): ApplyResult =
+        when (snapshot.mode) {
+            POCKET_EVO_PER_STICK_MODE -> controller.applyPocketEvoPerStick(
+                colors = snapshot.stickColors,
+                brightness = snapshot.stickBrightness,
+                colorCorrection = snapshot.colorCorrection,
+                mixedGreenPercent = snapshot.mixedGreenPercent,
+                mixedBluePercent = snapshot.mixedBluePercent,
             )
-            status = result.message
+            POCKET_EVO_QUADRANT_MODE -> controller.applyPocketEvoQuadrants(
+                colors = snapshot.zoneColors,
+                brightness = snapshot.zoneBrightness,
+                colorCorrection = snapshot.colorCorrection,
+                mixedGreenPercent = snapshot.mixedGreenPercent,
+                mixedBluePercent = snapshot.mixedBluePercent,
+            )
+            else -> controller.apply(
+                snapshot.mode,
+                snapshot.red,
+                snapshot.green,
+                snapshot.blue,
+                snapshot.brightness,
+                snapshot.colorCorrection,
+                snapshot.mixedGreenPercent,
+                snapshot.mixedBluePercent,
+                snapshot.reactiveIdleColor,
+                snapshot.reactiveHighlightColor,
+            )
+        }
+
+    fun applyNow() {
+        if (applyRunning) return
+        val snapshot = captureApplySnapshot()
+        applyRunning = true
+        scope.launch {
+            try {
+                status = if (snapshot.mode in setOf(
+                        POCKET_EVO_PER_STICK_MODE,
+                        POCKET_EVO_QUADRANT_MODE,
+                    )
+                ) {
+                    "Applying validated Pocket EVO frames…"
+                } else {
+                    "Applying…"
+                }
+                status = applySnapshot(snapshot).message
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                status = "RGB apply failed: ${error.message ?: error.javaClass.simpleName}"
+            } finally {
+                applyRunning = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (controller.hasInterruptedPocketEvoTransaction) {
+            applyRunning = true
+            try {
+                val recovered = controller.recoverInterruptedPocketEvoTransaction()
+                if (recovered != null) {
+                    status = recovered.message
+                    if (recovered.success) {
+                        restoreStockUi()
+                    }
+                } else {
+                    status = if (controller.isPocketEvoDirectControlActive) {
+                        "Pocket EVO direct RGB control active · GameWindow paused"
+                    } else {
+                        restoreStockUi()
+                        "Connected to AYANEO GameWindow"
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                status = "GameWindow recovery failed: " +
+                    (error.message ?: error.javaClass.simpleName)
+            } finally {
+                applyRunning = false
+            }
         }
     }
 
@@ -184,13 +367,36 @@ private fun AyaneoRgbApp(controller: RgbController) {
         mixedGreenPercent,
         mixedBluePercent,
         reactiveTarget,
+        pocketEvoStickTarget,
+        pocketEvoRingTarget,
+        pocketEvoZoneTarget,
     ) {
+        val selectedColor = AndroidColor.rgb(rgb[0], rgb[1], rgb[2]) and 0xFFFFFF
         if (mode == 7) {
-            val selectedColor = AndroidColor.rgb(rgb[0], rgb[1], rgb[2]) and 0xFFFFFF
             if (reactiveTarget == 0) reactiveIdleColor = selectedColor
             else reactiveHighlightColor = selectedColor
         }
-        if (livePreview && ledEnabled) {
+        if (mode == POCKET_EVO_PER_STICK_MODE && isPocketEvo) {
+            pocketEvoStickColors[pocketEvoStickTarget] = selectedColor
+            pocketEvoStickBrightness[pocketEvoStickTarget] = brightness.toInt()
+            controller.savePocketEvoStick(
+                pocketEvoStickTarget,
+                selectedColor,
+                brightness.toInt(),
+            )
+        }
+        if (mode == POCKET_EVO_QUADRANT_MODE && isPocketEvo) {
+            val target = pocketEvoRingTarget * 4 + pocketEvoZoneTarget
+            pocketEvoZoneColors[target] = selectedColor
+            pocketEvoZoneBrightness[target] = brightness.toInt()
+            controller.savePocketEvoZone(target, selectedColor, brightness.toInt())
+        }
+        if (suppressNextLivePreview) {
+            suppressNextLivePreview = false
+        } else if (
+            livePreview && ledEnabled &&
+            mode !in setOf(POCKET_EVO_PER_STICK_MODE, POCKET_EVO_QUADRANT_MODE)
+        ) {
             delay(100)
             applyNow()
         }
@@ -329,7 +535,146 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     }
                 }
 
+                val isPocketEvoDirectMode = isPocketEvo && mode in setOf(
+                    POCKET_EVO_PER_STICK_MODE,
+                    POCKET_EVO_QUADRANT_MODE,
+                )
+                if (mode == POCKET_EVO_PER_STICK_MODE && isPocketEvo) {
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Text(
+                                "Independent stick colours",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                listOf("Left stick", "Right stick").forEachIndexed { index, label ->
+                                    val targetColor = pocketEvoStickColors[index]
+                                    FilterChip(
+                                        selected = pocketEvoStickTarget == index,
+                                        onClick = { selectPocketEvoStick(index) },
+                                        leadingIcon = {
+                                            Box(
+                                                Modifier
+                                                    .size(18.dp)
+                                                    .clip(CircleShape)
+                                                    .background(
+                                                        Color(targetColor or 0xFF000000.toInt()),
+                                                    ),
+                                            )
+                                        },
+                                        label = { Text(label) },
+                                    )
+                                }
+                            }
+                            Text(
+                                "Select a stick, then choose its retained colour and brightness below.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                }
+                if (mode == POCKET_EVO_QUADRANT_MODE && isPocketEvo) {
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Text(
+                                "Eight retained quadrants",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                listOf("Left stick", "Right stick").forEachIndexed { ring, label ->
+                                    FilterChip(
+                                        selected = pocketEvoRingTarget == ring,
+                                        onClick = {
+                                            selectPocketEvoZone(ring, pocketEvoZoneTarget)
+                                        },
+                                        label = { Text(label) },
+                                    )
+                                }
+                            }
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                listOf(
+                                    1 to "0° Top",
+                                    2 to "90° Right",
+                                    3 to "180° Bottom",
+                                    0 to "270° Left",
+                                ).forEach { (zone, label) ->
+                                    val index = pocketEvoRingTarget * 4 + zone
+                                    val targetColor = pocketEvoZoneColors[index]
+                                    FilterChip(
+                                        selected = pocketEvoZoneTarget == zone,
+                                        onClick = { selectPocketEvoZone(pocketEvoRingTarget, zone) },
+                                        leadingIcon = {
+                                            Box(
+                                                Modifier
+                                                    .size(18.dp)
+                                                    .clip(CircleShape)
+                                                    .background(
+                                                        Color(targetColor or 0xFF000000.toInt()),
+                                                    ),
+                                            )
+                                        },
+                                        label = { Text(label) },
+                                    )
+                                }
+                            }
+                            Text(
+                                "Select a physical segment, then choose its retained colour and " +
+                                    "individual brightness below.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp,
+                            )
+                        }
+                    }
+                }
+
                 val colorSelectionSupported = mode != 2 && mode != 3
+                val brightnessSupported = mode != 2 && mode != 3
+                Text(
+                    if (brightnessSupported) {
+                        when (mode) {
+                            POCKET_EVO_PER_STICK_MODE ->
+                                "Selected stick brightness ${brightness.toInt()}%"
+                            POCKET_EVO_QUADRANT_MODE ->
+                                "Selected quadrant brightness ${brightness.toInt()}%"
+                            else -> "Brightness ${brightness.toInt()}%"
+                        }
+                    } else {
+                        "◆  Brightness fixed by this RGB effect"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (brightnessSupported) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        Color(0xFFFF9F43)
+                    },
+                    fontWeight = if (brightnessSupported) {
+                        FontWeight.Normal
+                    } else {
+                        FontWeight.Bold
+                    },
+                )
+                Slider(
+                    value = brightness,
+                    onValueChange = { brightness = it },
+                    valueRange = 1f..100f,
+                    enabled = brightnessSupported,
+                )
+
                 Text(
                     if (colorSelectionSupported) {
                         "Colour"
@@ -373,89 +718,91 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     rgb[0] * 0.299f + rgb[1] * 0.587f + rgb[2] * 0.114f
                 val codeTextColor =
                     if (perceivedBrightness > 150f) Color(0xFF101116) else Color.White
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(selectedColor)
-                        .border(
-                            1.dp,
-                            themeAccent.copy(alpha = .85f),
-                            RoundedCornerShape(14.dp),
+                val updateHex: (String) -> Unit = { input ->
+                    val clean = input.uppercase()
+                        .filter { it in "0123456789ABCDEF" }
+                        .take(6)
+                    hexText = clean
+                    if (clean.length == 6) {
+                        val parsed = clean.toLong(16).toInt()
+                        val hsv = FloatArray(3)
+                        AndroidColor.colorToHSV(
+                            AndroidColor.rgb(
+                                parsed shr 16 and 255,
+                                parsed shr 8 and 255,
+                                parsed and 255,
+                            ),
+                            hsv,
                         )
-                        .padding(horizontal = 16.dp, vertical = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("#", color = codeTextColor, fontWeight = FontWeight.Bold)
-                    BasicTextField(
-                        value = hexText,
-                        enabled = colorSelectionSupported,
-                        onValueChange = { input ->
-                            val clean = input.uppercase().filter { it in "0123456789ABCDEF" }.take(6)
-                            hexText = clean
-                            if (clean.length == 6) {
-                                val parsed = clean.toLong(16).toInt()
-                                val hsv = FloatArray(3)
-                                AndroidColor.colorToHSV(
-                                    AndroidColor.rgb(parsed shr 16 and 255, parsed shr 8 and 255, parsed and 255),
-                                    hsv,
-                                )
-                                hue = hsv[0]; saturation = hsv[1]; value = hsv[2]
-                                calibrationTargetKey = null
-                                calibrationTargetName = null
-                                calibrationOverrideEnabled = false
-                                mixedGreenPercent = globalGreenPercent
-                                mixedBluePercent = globalBluePercent
-                            }
-                        },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-                        textStyle = TextStyle(
-                            color = codeTextColor,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 16.sp,
-                        ),
-                        modifier = Modifier.width(72.dp),
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        "RGB ${rgb[0]}, ${rgb[1]}, ${rgb[2]}",
-                        color = codeTextColor,
-                        fontWeight = FontWeight.Medium,
-                    )
+                        hue = hsv[0]
+                        saturation = hsv[1]
+                        value = hsv[2]
+                        calibrationTargetKey = null
+                        calibrationTargetName = null
+                        calibrationOverrideEnabled = false
+                        mixedGreenPercent = globalGreenPercent
+                        mixedBluePercent = globalBluePercent
+                    }
                 }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .alpha(if (colorSelectionSupported) 1f else 0.38f)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(themeAccent)
-                        .border(
-                            1.dp,
-                            themeTextColor.copy(alpha = .28f),
-                            RoundedCornerShape(14.dp),
-                        )
-                        .clickable(enabled = colorSelectionSupported) {
-                            themeColor =
-                                AndroidColor.rgb(rgb[0], rgb[1], rgb[2]) and 0xFFFFFF
-                            controller.saveThemeColor(themeColor)
+                val useSelectedColourAsTheme = {
+                    themeColor = AndroidColor.rgb(rgb[0], rgb[1], rgb[2]) and 0xFFFFFF
+                    controller.saveThemeColor(themeColor)
+                }
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (maxWidth >= 480.dp) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            SelectedColourBar(
+                                selectedColor = selectedColor,
+                                codeTextColor = codeTextColor,
+                                themeAccent = themeAccent,
+                                rgb = rgb,
+                                hexText = hexText,
+                                enabled = colorSelectionSupported,
+                                onHexTextChange = updateHex,
+                                modifier = Modifier
+                                    .weight(3f)
+                                    .heightIn(min = 60.dp),
+                            )
+                            ThemeSelectorButton(
+                                themeAccent = themeAccent,
+                                themeTextColor = themeTextColor,
+                                enabled = colorSelectionSupported,
+                                compact = true,
+                                onClick = useSelectedColourAsTheme,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .heightIn(min = 60.dp),
+                            )
                         }
-                        .padding(horizontal = 16.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(
-                        Modifier
-                            .size(14.dp)
-                            .clip(CircleShape)
-                            .background(themeTextColor.copy(alpha = .78f)),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        "Use selected colour as theme",
-                        color = themeTextColor,
-                        fontWeight = FontWeight.Bold,
-                    )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            SelectedColourBar(
+                                selectedColor = selectedColor,
+                                codeTextColor = codeTextColor,
+                                themeAccent = themeAccent,
+                                rgb = rgb,
+                                hexText = hexText,
+                                enabled = colorSelectionSupported,
+                                onHexTextChange = updateHex,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 60.dp),
+                            )
+                            ThemeSelectorButton(
+                                themeAccent = themeAccent,
+                                themeTextColor = themeTextColor,
+                                enabled = colorSelectionSupported,
+                                compact = false,
+                                onClick = useSelectedColourAsTheme,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 60.dp),
+                            )
+                        }
+                    }
                 }
 
                 Text("Presets", style = MaterialTheme.typography.labelLarge)
@@ -539,32 +886,6 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     }
                 }
 
-                val brightnessSupported = mode != 2 && mode != 3
-                Text(
-                    if (brightnessSupported) {
-                        "Brightness ${brightness.toInt()}%"
-                    } else {
-                        "◆  Brightness fixed by this RGB effect"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (brightnessSupported) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        Color(0xFFFF9F43)
-                    },
-                    fontWeight = if (brightnessSupported) {
-                        FontWeight.Normal
-                    } else {
-                        FontWeight.Bold
-                    },
-                )
-                Slider(
-                    value = brightness,
-                    onValueChange = { brightness = it },
-                    valueRange = 1f..100f,
-                    enabled = brightnessSupported,
-                )
-
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -575,9 +896,14 @@ private fun AyaneoRgbApp(controller: RgbController) {
                         if (deviceProfile.supportsRgbCycle) add(2 to "RGB Breath")
                         add(3 to "Rainbow")
                         if (deviceProfile.supportsReactive) add(7 to "Reactive")
+                        if (isPocketEvo) {
+                            add(POCKET_EVO_PER_STICK_MODE to "Per stick")
+                            add(POCKET_EVO_QUADRANT_MODE to "Quadrants")
+                        }
                     }.forEach { (id, label) ->
                         FilterChip(
                             selected = mode == id,
+                            enabled = !applyRunning,
                             onClick = {
                                 mode = id
                                 controller.saveMode(id)
@@ -585,6 +911,15 @@ private fun AyaneoRgbApp(controller: RgbController) {
                                     selectArgb(
                                         if (reactiveTarget == 0) reactiveIdleColor
                                         else reactiveHighlightColor,
+                                    )
+                                }
+                                if (id == POCKET_EVO_PER_STICK_MODE) {
+                                    selectPocketEvoStick(pocketEvoStickTarget)
+                                }
+                                if (id == POCKET_EVO_QUADRANT_MODE) {
+                                    selectPocketEvoZone(
+                                        pocketEvoRingTarget,
+                                        pocketEvoZoneTarget,
                                     )
                                 }
                             },
@@ -625,19 +960,26 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     )
                 }
 
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Switch(
-                        checked = livePreview,
-                        onCheckedChange = {
-                            livePreview = it
-                            controller.saveLivePreview(it)
-                        },
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Live preview")
-                    Spacer(Modifier.weight(1f))
-                    Button(onClick = { applyNow() }) { Text("Apply") }
-                }
+                ApplyControls(
+                    previewChecked = livePreview && !isPocketEvoDirectMode,
+                    previewEnabled = !isPocketEvoDirectMode,
+                    previewLabel = if (isPocketEvoDirectMode) {
+                        "Live preview disabled for multi-frame apply"
+                    } else {
+                        "Live preview"
+                    },
+                    applyLabel = when (mode) {
+                        POCKET_EVO_PER_STICK_MODE -> "Apply both sticks"
+                        POCKET_EVO_QUADRANT_MODE -> "Apply 8 quadrants"
+                        else -> "Apply"
+                    },
+                    applyEnabled = ledEnabled && !applyRunning,
+                    onPreviewChanged = {
+                        livePreview = it
+                        controller.saveLivePreview(it)
+                    },
+                    onApply = { applyNow() },
+                )
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(
@@ -736,11 +1078,39 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(
                         checked = ledEnabled,
+                        enabled = !applyRunning,
                         onCheckedChange = { enabled ->
-                            ledEnabled = enabled
+                            if (applyRunning) return@Switch
+                            val previous = ledEnabled
+                            val snapshot = captureApplySnapshot()
+                            applyRunning = true
                             scope.launch {
-                                status = controller.setLedEnabled(enabled).message
-                                if (enabled) applyNow()
+                                try {
+                                    status = if (enabled) "Enabling LEDs…" else "Disabling LEDs…"
+                                    val toggled = if (enabled) {
+                                        // Applying the captured layout also opens the LEDs. Keeping
+                                        // this as one controller transaction prevents rotation from
+                                        // landing between "on" and the restoring colour frames.
+                                        applySnapshot(snapshot)
+                                    } else {
+                                        controller.setLedEnabled(false)
+                                    }
+                                    if (!toggled.success) {
+                                        ledEnabled = previous
+                                        status = toggled.message
+                                    } else {
+                                        ledEnabled = enabled
+                                        status = toggled.message
+                                    }
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (error: Exception) {
+                                    ledEnabled = previous
+                                    status = "LED change failed: " +
+                                        (error.message ?: error.javaClass.simpleName)
+                                } finally {
+                                    applyRunning = false
+                                }
                             }
                         },
                     )
@@ -752,6 +1122,46 @@ private fun AyaneoRgbApp(controller: RgbController) {
                     status,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (isPocketEvo) {
+                    OutlinedButton(
+                        onClick = {
+                            if (applyRunning) return@OutlinedButton
+                            applyRunning = true
+                            scope.launch {
+                                try {
+                                    status = "Returning RGB control to GameWindow…"
+                                    val restored = controller.restorePocketEvoGameWindow()
+                                    status = restored.message
+                                    if (restored.success) {
+                                        restoreStockUi()
+                                    }
+                                } catch (error: CancellationException) {
+                                    throw error
+                                } catch (error: Exception) {
+                                    status = "GameWindow handoff failed: " +
+                                        (error.message ?: error.javaClass.simpleName)
+                                } finally {
+                                    applyRunning = false
+                                }
+                            }
+                        },
+                        enabled = !applyRunning,
+                    ) {
+                        Text("Return RGB control to AYANEO")
+                    }
+                }
+                if ("PocketEVO" in deviceProfile.deviceNames) {
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                status = "Building GameWindow research bundle…"
+                                status = controller.exportGameWindowResearchBundle().message
+                            }
+                        },
+                    ) {
+                        Text("Export GameWindow research ZIP")
+                    }
+                }
                 OutlinedButton(
                     onClick = {
                         scope.launch {
@@ -765,6 +1175,143 @@ private fun AyaneoRgbApp(controller: RgbController) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ApplyControls(
+    previewChecked: Boolean,
+    previewEnabled: Boolean,
+    previewLabel: String,
+    applyLabel: String,
+    applyEnabled: Boolean,
+    onPreviewChanged: (Boolean) -> Unit,
+    onApply: () -> Unit,
+) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth < 480.dp) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        checked = previewChecked,
+                        onCheckedChange = onPreviewChanged,
+                        enabled = previewEnabled,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(previewLabel, modifier = Modifier.weight(1f), maxLines = 2)
+                }
+                Button(
+                    onClick = onApply,
+                    enabled = applyEnabled,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(applyLabel)
+                }
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Switch(
+                    checked = previewChecked,
+                    onCheckedChange = onPreviewChanged,
+                    enabled = previewEnabled,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(previewLabel, modifier = Modifier.weight(1f), maxLines = 2)
+                Spacer(Modifier.width(12.dp))
+                Button(onClick = onApply, enabled = applyEnabled) {
+                    Text(applyLabel)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectedColourBar(
+    selectedColor: Color,
+    codeTextColor: Color,
+    themeAccent: Color,
+    rgb: IntArray,
+    hexText: String,
+    enabled: Boolean,
+    onHexTextChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(14.dp))
+            .background(selectedColor)
+            .border(
+                1.dp,
+                themeAccent.copy(alpha = .85f),
+                RoundedCornerShape(14.dp),
+            )
+            .padding(horizontal = 16.dp, vertical = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("#", color = codeTextColor, fontWeight = FontWeight.Bold)
+        BasicTextField(
+            value = hexText,
+            enabled = enabled,
+            onValueChange = onHexTextChange,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+            textStyle = TextStyle(
+                color = codeTextColor,
+                fontWeight = FontWeight.Bold,
+                fontSize = 16.sp,
+            ),
+            modifier = Modifier.width(72.dp),
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            "RGB ${rgb[0]}, ${rgb[1]}, ${rgb[2]}",
+            color = codeTextColor,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+@Composable
+private fun ThemeSelectorButton(
+    themeAccent: Color,
+    themeTextColor: Color,
+    enabled: Boolean,
+    compact: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .alpha(if (enabled) 1f else 0.38f)
+            .clip(RoundedCornerShape(14.dp))
+            .background(themeAccent)
+            .border(
+                1.dp,
+                themeTextColor.copy(alpha = .28f),
+                RoundedCornerShape(14.dp),
+            )
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = if (compact) 8.dp else 16.dp, vertical = 14.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(14.dp)
+                .clip(CircleShape)
+                .background(themeTextColor.copy(alpha = .78f)),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (compact) "Set theme" else "Use selected colour as theme",
+            color = themeTextColor,
+            fontWeight = FontWeight.Bold,
+            fontSize = if (compact) 12.sp else 14.sp,
+        )
     }
 }
 

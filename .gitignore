@@ -12,6 +12,11 @@ local.properties
 *.aab
 *.zip
 
+# Python research tools
+__pycache__/
+*.py[cod]
+captures/
+
 # OS files
 .DS_Store
 Thumbs.db
